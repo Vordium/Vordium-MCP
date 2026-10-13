@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vordium-mcp"
+dynamic = ["version"]
+description = "Model Context Protocol server for Vordium: market data, accounts and policy-limited agent trading for any MCP client"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Vordium", email = "dev@vordium.com" }]
+keywords = ["vordium", "mcp", "model-context-protocol", "ai", "agents", "perps", "clob", "trading"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+# Reading needs nothing beyond the standard library. Signing orders needs the Vordium SDK.
+dependencies = []
+
+[project.optional-dependencies]
+trade = ["vordium>=1.4.5"]
+
+[project.urls]
+Homepage = "https://vordium.com"
+Documentation = "https://docs.vordium.com/build/mcp/"
+Repository = "https://github.com/Vordium/vordium-mcp"
+Explorer = "https://vordscan.io"
+
+[project.scripts]
+vordium-mcp = "vordium_mcp.__main__:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "vordium_mcp.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["vordium_mcp*"]

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "vordium": {
+      "command": "uvx",
+      "args": ["vordium-mcp"]
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "vordium": {
+      "command": "uvx",
+      "args": ["--from", "vordium-mcp[trade]", "vordium-mcp", "--allow-trading",
+               "--owner", "0xYOUR_OWNER_ADDRESS", "--agent-key-file", "~/.vordium/agent.key"]
+    }
+  }
+}

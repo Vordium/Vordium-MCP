@@ -1,0 +1,68 @@
+# Publish vordium-mcp to PyPI via Trusted Publishing (OIDC): no token, no secrets.
+#
+# Runs only on a version tag (e.g. v0.3.0). Setup on PyPI (a pending publisher for the new project):
+#   project      = vordium-mcp
+#   owner        = Vordium
+#   repository   = vordium-mcp
+#   workflow     = publish.yml
+#   environment  = pypi
+# Until that registration exists, the publish job fails closed.
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test suite (a failing suite cannot publish)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: the tag names the package version
+        run: |
+          ver=$(python -c 'import re; print(re.search(r"__version__ = \"([^\"]+)\"", open("vordium_mcp/__init__.py").read()).group(1))')
+          echo "tag ${GITHUB_REF_NAME} · package version ${ver}"
+          if [ "${GITHUB_REF_NAME}" != "v${ver}" ]; then echo "::error::the tag ${GITHUB_REF_NAME} does not match the package version ${ver}; nothing is published"; exit 1; fi
+      - run: python -m pip install ".[trade]" pytest
+      - run: python -m pytest -q tests
+
+  build:
+    name: build sdist + wheel
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade build
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: publish to PyPI (OIDC trusted publishing)
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
