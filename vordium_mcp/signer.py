@@ -55,11 +55,12 @@ def _client(cfg, rest):
     return dex, dex.Vordex(rpc_url=rest, network=net)
 
 
-def place(cfg, rest, pair_id, side, size, price, leverage, order_type, reduce_only, post_only):
+def place(cfg, rest, pair_id, side, size, price, leverage, order_type, reduce_only, post_only, client_nonce=None):
     dex, client = _client(cfg, rest)
     return client.place_order(session_key=_read_key(cfg.agent_key_file), owner=cfg.owner, pair_id=int(pair_id),
                               side=int(side), size=float(size), price=float(price), leverage=float(leverage),
-                              order_type=int(order_type), reduce_only=bool(reduce_only), post_only=bool(post_only))
+                              order_type=int(order_type), reduce_only=bool(reduce_only), post_only=bool(post_only),
+                              client_nonce=client_nonce)
 
 
 def cancel(cfg, rest, order_id):

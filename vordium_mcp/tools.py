@@ -10,6 +10,7 @@ Rules this file enforces:
 
 The limits an agent trades under are enforced by the chain, on every validator. This server only refuses early.
 """
+import time
 import re
 
 from .chain import ChainUnreachable
@@ -450,7 +451,7 @@ def _write(chain, cfg, kind, params, do):
                       remedy="Each blocker names the reading it came from. Nothing was signed or sent.")
     answer = do(signer, agent, pair)
     code = answer.get("status_code") if isinstance(answer, dict) else None
-    return {"network": chain.network, "sent": True, "chain_status": code, "chain_answer": answer,
+    return {"network": chain.network, "sent": True, "agent": agent, "chain_status": code, "chain_answer": answer,
             "accepted": isinstance(code, int) and 200 <= code < 300,
             "note": "This is the chain's own answer, unchanged. Accepted means received, not filled: read "
                     "get_orders and get_positions to see what the chain applied. The chain enforces the agent's "
@@ -477,11 +478,75 @@ def place_order(chain, cfg, params):
     if size <= 0 or leverage < 1 or (otype == 1 and price <= 0):
         raise Refusal("size must be above 0, leverage at least 1, and a limit order needs a price above 0")
 
+    nonce = int(time.time() * 1000)                  # sent explicitly, so the chain's refusal record can be matched to it
+
     def do(signer, agent, pair):
         return signer.place(cfg, chain.rest, pair_id=pair["pair_id"], side=side, size=size, price=price,
                             leverage=leverage, order_type=otype, reduce_only=bool(params.get("reduce_only", False)),
-                            post_only=bool(params.get("post_only", False)))
-    return _write(chain, cfg, "place_order", params, do)
+                            post_only=bool(params.get("post_only", False)), client_nonce=nonce)
+    out = _write(chain, cfg, "place_order", params, do)
+    if out.get("accepted"):
+        why = refusal_of(chain, out.get("agent"), nonce)
+        if why is not None:
+            out.update(accepted=False, refused=True, refusal_reason=why,
+                       note="The chain received the order and then refused it (its agent_refused record names the reason). "
+                            "Nothing reached the book.")
+            _add_meaning(chain, out)
+    else:
+        _intake_refusal(chain, out)
+    out["client_nonce"] = nonce
+    return out
+
+
+def refusal_meanings(chain):
+    """The network's agent refusal codes: {reason key: plain meaning} from the spec's agents.refusalCodes.reasons, or {}
+    when the network publishes none (a reason is then reported as the chain wrote it)."""
+    r = chain.spec()
+    doc = r["json"] if r.ok and isinstance(r["json"], dict) else {}
+    rc = (doc.get("agents") or {}).get("refusalCodes") if isinstance(doc.get("agents"), dict) else None
+    out = {}
+    for x in (rc or {}).get("reasons") or [] if isinstance(rc, dict) else []:
+        if isinstance(x, dict) and isinstance(x.get("key"), str) and isinstance(x.get("meaning"), str):
+            out[x["key"]] = x["meaning"]
+    return out
+
+
+def _add_meaning(chain, out):
+    meaning = refusal_meanings(chain).get(out.get("refusal_reason"))
+    if meaning:
+        out["refusal_meaning"] = meaning
+
+
+def _intake_refusal(chain, out):
+    """A node that checks agent orders at intake answers 403 with code agent_refused, the reason key and its meaning."""
+    ans = out.get("chain_answer")
+    if isinstance(ans, dict) and ans.get("code") == "agent_refused":
+        out.update(refused=True, refusal_reason=str(ans.get("reason") or "refused"),
+                   note="The chain refused the agent's order when it received it. Nothing reached the book.")
+        if isinstance(ans.get("meaning"), str) and ans["meaning"]:
+            out["refusal_meaning"] = ans["meaning"]
+        else:
+            _add_meaning(chain, out)
+
+
+REFUSAL_WAIT_S = 4.0
+
+
+def refusal_of(chain, agent, nonce, wait_s=None, step=0.5):
+    """The reason the chain gives for refusing this order (GET /events/agent/{agent}, kind agent_refused, matched by
+    client_nonce), or None when it records none within wait_s. A 2xx answer is only receipt: the refusal comes after."""
+    if not agent:
+        return None
+    end = time.monotonic() + (REFUSAL_WAIT_S if wait_s is None else wait_s)
+    while True:
+        r = chain.agent_events(agent)
+        ev = r["json"].get("events") if r.ok and isinstance(r["json"], dict) else None
+        for e in ev or []:
+            if isinstance(e, dict) and e.get("kind") == "agent_refused" and str(e.get("client_nonce")) == str(nonce):
+                return str(e.get("reason") or "refused")
+        if time.monotonic() >= end:
+            return None
+        time.sleep(step)
 
 
 def cancel_order(chain, cfg, params):
@@ -492,7 +557,10 @@ def cancel_order(chain, cfg, params):
 
     def do(signer, agent, pair):
         return signer.cancel(cfg, chain.rest, order_id=order_id)
-    return _write(chain, cfg, "cancel_order", params, do)
+    out = _write(chain, cfg, "cancel_order", params, do)
+    if not out.get("accepted"):
+        _intake_refusal(chain, out)
+    return out
 
 
 # ── schemas ──────────────────────────────────────────────────────────────────

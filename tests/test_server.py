@@ -253,6 +253,53 @@ def test_market_order_carries_no_price(stub):
     assert not err and stub.sent[0][1]["price"] == 0.0 and stub.sent[0][1]["side"] == 1
 
 
+@pytest.fixture(autouse=True)
+def _short_refusal_wait(monkeypatch):
+    import vordium_mcp.tools as T
+    monkeypatch.setattr(T, "REFUSAL_WAIT_S", 0.2)
+
+
+def test_a_refusal_the_chain_records_after_receipt_is_reported(stub, monkeypatch):
+    """The intake answers 202, then the chain refuses the agent's order: the tool must say refused, with the reason."""
+    import time as _t
+    monkeypatch.setattr(_t, "time", lambda: 1_792_000_000.0)
+    rest = NETWORKS["testnet"]["rest"]
+    ev = {"events": [{"kind": "agent_refused", "op_kind": "PlaceOrder", "client_nonce": 1_792_000_000_000, "reason": "price_outside_band"}]}
+    net, cfg, chain = setup(active=True, **{rest + f"/events/agent/{AGENT}": ev})
+    err, doc = call(chain, trading_cfg(cfg), "place_order", ORDER)
+    assert not err and doc["accepted"] is False and doc["refused"] is True and doc["refusal_reason"] == "price_outside_band"
+    assert stub.sent[0][1]["client_nonce"] == 1_792_000_000_000
+    # a refusal of ANOTHER order is not this order's
+    ev2 = {"events": [{"kind": "agent_refused", "client_nonce": 5, "reason": "price_outside_band"}]}
+    net, cfg, chain = setup(active=True, **{rest + f"/events/agent/{AGENT}": ev2})
+    err, doc = call(chain, trading_cfg(cfg), "place_order", ORDER)
+    assert not err and doc["accepted"] is True and "refused" not in doc
+
+
+def test_refusal_reads_in_the_networks_own_words(stub, monkeypatch):
+    """With the network's refusal codes published, a refused order carries the reason key AND its meaning."""
+    import time as _t
+    monkeypatch.setattr(_t, "time", lambda: 1_792_000_000.0)
+    n, rest = NETWORKS["testnet"], NETWORKS["testnet"]["rest"]
+    ev = {"events": [{"kind": "agent_refused", "client_nonce": 1_792_000_000_000, "reason": "price_outside_band"}]}
+    codes = {"reasons": [{"key": "price_outside_band", "meaning": "The price is outside the policy's band around the oracle price."}]}
+    net, cfg, chain = setup(active=True, **{rest + f"/events/agent/{AGENT}": ev})
+    spec = dict(chain.spec()["json"]); spec["agents"] = {"refusalCodes": codes}
+    net, cfg, chain = setup(active=True, **{rest + f"/events/agent/{AGENT}": ev, n["spec"]: spec})
+    err, doc = call(chain, trading_cfg(cfg), "place_order", ORDER)
+    assert not err and doc["refused"] is True and doc["refusal_reason"] == "price_outside_band"
+    assert doc["refusal_meaning"] == "The price is outside the policy's band around the oracle price."
+
+
+def test_an_intake_refusal_is_reported_with_its_reason(stub):
+    """A node that checks agent orders at intake answers 403 agent_refused: refused, with the reason and meaning."""
+    stub.answer = {"code": "agent_refused", "reason": "registration_not_live", "meaning": "The agent's registration is revoked or expired.", "status_code": 403}
+    net, cfg, chain = setup(active=True)
+    err, doc = call(chain, trading_cfg(cfg), "place_order", ORDER)
+    assert not err and doc["accepted"] is False and doc["refused"] is True and doc["refusal_reason"] == "registration_not_live"
+    assert doc["refusal_meaning"] == "The agent's registration is revoked or expired."
+
+
 def test_chain_refusal_is_relayed_not_success(stub):
     stub.answer = {"error": "insufficient margin", "status_code": 400}
     net, cfg, chain = setup(active=True)

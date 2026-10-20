@@ -126,6 +126,9 @@ class Chain:
     def agent(self, owner, agent):
         return self.read(f"/agents/{owner}/{agent}", cache=False)
 
+    def agent_events(self, agent):
+        return self.read(f"/events/agent/{agent}", cache=False)
+
     def session_valid(self, owner, key):
         return self.read(f"/session/valid?owner={owner}&session_key={key}", cache=False)
 
