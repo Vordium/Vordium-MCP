@@ -37,6 +37,29 @@ class Caught:
         return R()
 
 
+# The fake node's market rules (GET /markets/specs): the SDK puts every order on its market's tick and lot before signing.
+SPECS = {"specs": {"min_order_notional_6dec": 10_000_000, "pairs": [
+    {"pair": {"pair_id": 1, "symbol": "ETH-USDC", "min_size_18dec": 10 ** 15}, "tick_8dec": 1_000_000,
+     "lot_18dec": 10 ** 15, "liquidation_fee_bps": 50, "maintenance_margin_bps": 250}]}}
+
+
+class Specs:
+    def __call__(self, url, timeout=None, **kw):
+        assert url == "https://rest.invalid/markets/specs", url                  # the only read the signer may make
+
+        class R:
+            status_code = 200
+
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return SPECS
+        return R()
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     p = tmp_path / "agent.key"
@@ -50,6 +73,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(node_domain, "node_identity", lambda url, **kw: node_domain.NodeIdentity(CHAIN, GENESIS))
     caught = Caught()
     monkeypatch.setattr(_http, "post", caught)
+    monkeypatch.setattr(_http, "get", Specs(), raising=False)
     cfg = Config(network="testnet", allow_trading=True, owner=OWNER, agent_key_file=str(p))
     return cfg, caught
 
