@@ -14,6 +14,10 @@ from vordium_mcp.server import RateLimit, handle, make_chain, make_http_handler,
 READS = ["get_network", "get_markets", "get_oracle", "get_orderbook", "get_funding", "get_balance", "get_positions",
          "get_orders", "get_policy", "get_risk"]
 WRITES = ["place_order", "cancel_order"]
+LISTED = ["get_status", "get_network", "get_markets", "get_fees", "get_oracle", "get_orderbook", "get_candles", "get_trades",
+          "get_funding", "get_account", "get_fills", "get_balance", "get_positions", "get_orders", "get_agents",
+          "get_policy", "get_risk", "get_tiers", "get_season", "get_points", "get_leaderboard", "get_referrals", "get_tx",
+          "get_block", "get_address"]
 
 
 def call(chain, cfg, name, args=None):
@@ -29,7 +33,7 @@ def test_initialize_and_list():
     assert r["result"]["protocolVersion"] == "2025-06-18"
     assert "testnet" in r["result"]["instructions"] and "private key" in r["result"]["instructions"]
     names = [t["name"] for t in handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, chain, cfg)["result"]["tools"]]
-    assert names == READS + WRITES
+    assert names == LISTED + WRITES
     assert handle({"jsonrpc": "2.0", "method": "notifications/initialized"}, chain, cfg) is None
     assert handle({"jsonrpc": "2.0", "id": 3, "method": "nope"}, chain, cfg)["error"]["code"] == -32601
     assert net.calls == []                                           # nothing read just to start
@@ -37,8 +41,16 @@ def test_initialize_and_list():
 
 def test_unknown_protocol_version_gets_the_newest():
     net, cfg, chain = setup()
-    r = handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "1999-01-01"}}, chain, cfg)
-    assert r["result"]["protocolVersion"] == "2025-06-18"
+    for asked in ("1999-01-01", "2099-12-31", None, 7):
+        r = handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": asked}}, chain, cfg)
+        assert r["result"]["protocolVersion"] == "2025-11-25"
+
+
+def test_every_supported_version_is_agreed():
+    net, cfg, chain = setup()
+    for v in ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"):
+        r = handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": v}}, chain, cfg)
+        assert r["result"]["protocolVersion"] == v
 
 
 def test_stdio_loop():
@@ -347,7 +359,7 @@ def test_read_only_server_has_no_write_tools():
     net, cfg, chain = setup(active=True)
     ro = dataclasses.replace(cfg, read_only=True)
     names = [t["name"] for t in handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, chain, ro)["result"]["tools"]]
-    assert names == READS
+    assert names == LISTED
     err, doc = call(chain, ro, "place_order", ORDER)
     assert err and "no tool named" in doc["reason"]
 
@@ -395,6 +407,25 @@ def http_server():
     srv.shutdown()
 
 
+def test_every_version_header_is_served():
+    """claude.ai sends MCP-Protocol-Version 2025-11-25; a newer or unknown value must not cut a connection off."""
+    from http.server import ThreadingHTTPServer
+    net, cfg, chain = setup(active=True)
+    cfg = dataclasses.replace(cfg, read_only=True, http="localhost:0", rate_per_minute=600)
+    srv = ThreadingHTTPServer(("localhost", 0), make_http_handler(cfg, chain, RateLimit(600)))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://localhost:{srv.server_address[1]}/mcp"
+    try:
+        for v in ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05", "2099-12-31", "not-a-version"):
+            s, b = post(url, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": v}},
+                        {"MCP-Protocol-Version": v})
+            assert s == 200 and json.loads(b)["result"]["protocolVersion"] == (v if v.startswith("202") and v != "2099-12-31" else "2025-11-25")
+            for m in ("ping", "tools/list"):
+                assert post(url, {"jsonrpc": "2.0", "id": 2, "method": m}, {"MCP-Protocol-Version": v})[0] == 200
+    finally:
+        srv.shutdown()
+
+
 def post(url, body, headers=None):
     req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
@@ -411,7 +442,7 @@ def test_http_serves_reads_and_no_writes(http_server):
     s, b = post(url, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
     assert s == 200 and "read-only" in json.loads(b)["result"]["instructions"]
     s, b = post(url, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-    assert [t["name"] for t in json.loads(b)["result"]["tools"]] == READS
+    assert [t["name"] for t in json.loads(b)["result"]["tools"]] == LISTED
     s, b = post(url, {"jsonrpc": "2.0", "method": "notifications/initialized"})
     assert s == 202 and b == b""
     s, b = post(url, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "place_order", "arguments": ORDER}})
@@ -422,7 +453,7 @@ def test_http_refusals(http_server):
     url = http_server + "/mcp"
     assert post(url, {"jsonrpc": "2.0", "id": 1, "method": "ping"}, {"Origin": "https://evil.example"})[0] == 403
     assert post(url, {"jsonrpc": "2.0", "id": 1, "method": "ping"}, {"Origin": "https://ok.example"})[0] == 200
-    assert post(url, {"jsonrpc": "2.0", "id": 1, "method": "ping"}, {"MCP-Protocol-Version": "1999-01-01"})[0] == 400
+    assert post(url, {"jsonrpc": "2.0", "id": 1, "method": "ping"}, {"MCP-Protocol-Version": "2099-12-31"})[0] == 200
     assert post(url, [{"jsonrpc": "2.0", "id": 1, "method": "ping"}])[0] == 400
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen(url, timeout=5)
@@ -437,3 +468,16 @@ def test_rate_limit_refills():
     assert all(rl.allow("a") for _ in range(60)) and not rl.allow("a") and rl.allow("b")
     t[0] += 1.0
     assert rl.allow("a") and not rl.allow("a")
+
+
+def test_policy_list_reads_each_agents_own_record():
+    # the list carries only flags; get_policy without an agent reads each agent's full record (policy_v1, market limits)
+    n = NETWORKS["testnet"]
+    full = {"found": True, "agent": AGENT, "status": "active", "policy_v1": {"daily_loss_limit_6dec": 20000000},
+            "market_limits": [{"pair": 1, "allowed": True}]}
+    net, cfg, chain = setup(**{n["rest"] + f"/agents/{OWNER}/{AGENT}": full,
+                               n["rest"] + f"/agents/{OWNER}": {"owner": OWNER, "count": 1, "agents": [{"agent": AGENT, "has_policy_v1": True}]}})
+    out = tools.call(chain, cfg, "get_policy", {"address": OWNER})
+    rec = out["agents"][0]["record"]
+    assert rec["policy_v1"]["daily_loss_limit_6dec"] == 20000000 and rec["market_limits"][0]["pair"] == 1
+    assert "policy_v1" in out["agents"][0]["policy_fields_present"]

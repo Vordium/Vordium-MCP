@@ -10,10 +10,13 @@ Rules this file enforces:
 
 The limits an agent trades under are enforced by the chain, on every validator. This server only refuses early.
 """
+import math
 import time
 import re
 
+from . import reads
 from .chain import ChainUnreachable
+from .reads import NotServed, short, usd, amount
 
 ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 KEYISH_FIELD = re.compile(r"priv|secret|mnemonic|seed|passphrase|keystore|password|key_?file", re.I)
@@ -32,8 +35,9 @@ class Refusal(Exception):
                         "note": "Nothing was signed or sent."}
 
 
-def reject_key_material(params):
-    """Refuse before anything is read, logged or forwarded. The offending value is never echoed back."""
+def reject_key_material(params, hashes=()):
+    """Refuse before anything is read, logged or forwarded. The offending value is never echoed back. ``hashes`` names
+    the top-level arguments that take a transaction hash, which has the same form as a private key."""
     def walk(node, path="$"):
         if isinstance(node, dict):
             for k, v in node.items():
@@ -46,6 +50,8 @@ def reject_key_material(params):
             for i, v in enumerate(node):
                 walk(v, f"{path}[{i}]")
         elif isinstance(node, str):
+            if path in tuple(f"$.{h}" for h in hashes):
+                return
             words = node.split()
             if (MNEMONIC.match(node) and len(words) in (12, 15, 18, 21, 24)) or KEYISH_VALUE.match(node.strip()):
                 raise Refusal(f"{path} looks like a private key or recovery phrase; this server never takes one "
@@ -77,7 +83,7 @@ def _pair(chain, params, required=True):
     if params.get("pair_id") is not None:
         try:
             p = chain.pair_by_id(int(params.get("pair_id")))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             p = None
     else:
         p = chain.pair_by_symbol(params.get("symbol"))
@@ -156,9 +162,11 @@ def get_network(chain, cfg, params):
            "source": source(r)}
     if doc is None or doc.get("version") != 1:
         out["truth"] = {"established": False, "why": f"the network's answer could not be read ({r['status']})"}
+        out["summary"] = f"Connected to the {chain.network}; its own answer could not be read ({r['status']})."
         return out
     if doc.get("ok") is not True:
         out["truth"] = {"established": False, "why": str(doc.get("error") or "not ok"), "stale": doc.get("stale")}
+        out["summary"] = f"Connected to the {chain.network}; the network cannot vouch for its state right now."
         return out
     committed = doc.get("committed") or {}
     out["truth"] = {
@@ -177,6 +185,12 @@ def get_network(chain, cfg, params):
     }
     out["note"] = ("These facts come from the network's own answer: several validators are read at once and compared. "
                    "When they cannot agree the answer says so, and this tool reports it as not established.")
+    t = out["truth"]
+    out["summary"] = (f"Connected to the {chain.network} (chain id {t['chain_id']}): finalized block "
+                      f"{t['finalized_height']:,} agreed by {t['validators_agreeing']} of {t['validators_seated']} "
+                      f"validators; trading {({True: 'open', False: 'closed'}).get(t['trading_open'], 'unknown')}, agent trading "
+                      f"{({True: 'on', False: 'off'}).get(t['agent_policy_active'], 'unknown')}." if isinstance(t.get("finalized_height"), int)
+                      else f"Connected to the {chain.network}.")
     return out
 
 
@@ -203,7 +217,10 @@ def get_markets(chain, cfg, params):
         venue = {k: specs.get(k) for k in ("min_order_notional_6dec", "max_open_orders_per_wallet", "price_band_active",
                                            "price_band_bps", "funding_interval_secs", "withdrawal_fee_6dec")
                  if k in specs}
-    return {"network": chain.network, "count": len(out), "markets": out, "venue_rules": venue,
+    active = [r.get("symbol") for r in out if r.get("active") is not False and not r.get("paused") and not r.get("delisted")]
+    return {"summary": f"{len(out)} markets on the {chain.network}, {len(active)} trading: "
+                       + ", ".join(str(x) for x in active[:12]) + ("…" if len(active) > 12 else "") + ".",
+            "network": chain.network, "count": len(out), "markets": out, "venue_rules": venue,
             "units": "fees in basis points; leverage in basis points (10000 = 1x) and as x; 6dec fields are USDC "
                      "6-decimal integers; 8dec fields 8-decimal prices; 18dec fields 18-decimal sizes. A tick or lot "
                      "of 0 means the network sets none.",
@@ -225,7 +242,10 @@ def get_oracle(chain, cfg, params):
     if params.get("symbol") or params.get("pair_id") is not None:
         pair = _pair(chain, params)
         out = [r for r in out if r.get("pair_id") == pair.get("pair_id")]
-    return {"network": chain.network, "prices": out, "units": "USD, as decimals",
+    one = out[0] if len(out) == 1 else None
+    return {"summary": (f"{one.get('market_symbol') or one.get('symbol')}: mark {usd(one.get('mark_price'))}, oracle "
+                        f"{usd(one.get('oracle_price'))}." if one else f"Oracle and mark prices for {len(out)} markets."),
+            "network": chain.network, "prices": out, "units": "USD, as decimals",
             "source": source(o, chain.markets())}
 
 
@@ -235,7 +255,7 @@ def get_orderbook(chain, cfg, params):
     depth = params.get("depth", 20)
     try:
         depth = max(1, min(100, int(depth)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         depth = 20
     ob = chain.orderbook(pair["pair_id"])
     doc = chain.require(ob, "order book")
@@ -250,7 +270,11 @@ def get_orderbook(chain, cfg, params):
     bids, asks = side(doc.get("bids")), side(doc.get("asks"))
     best_bid = bids[0]["price"] if bids else None
     best_ask = asks[0]["price"] if asks else None
-    return {"network": chain.network, "market": pair.get("symbol"), "pair_id": pair.get("pair_id"),
+    return {"summary": (f"{pair.get('symbol')}: best bid {usd(best_bid)}, best ask {usd(best_ask)}, spread "
+                        f"{usd(round(best_ask - best_bid, 6))}; {len(bids)} bid and {len(asks)} ask levels shown."
+                        if best_bid is not None and best_ask is not None else f"{pair.get('symbol')}: the book is "
+                        f"{'empty' if not bids and not asks else 'one-sided'}."),
+            "network": chain.network, "market": pair.get("symbol"), "pair_id": pair.get("pair_id"),
             "bids": bids, "asks": asks, "best_bid": best_bid, "best_ask": best_ask,
             "spread": round(best_ask - best_bid, 6) if best_bid is not None and best_ask is not None else None,
             "empty": not bids and not asks,
@@ -264,12 +288,32 @@ def get_funding(chain, cfg, params):
     f = chain.funding(pair["pair_id"])
     doc = chain.require(f, "funding")
     rate8 = doc.get("rate_8dec")
-    return {"network": chain.network, "market": pair.get("symbol"), "pair_id": pair.get("pair_id"),
-            "rate_per_interval_pct": (rate8 / 10 ** 6) if isinstance(rate8, int) else doc.get("rate_pct"),
-            "interval_secs": doc.get("interval_secs"), "next_funding": doc.get("next_funding"),
-            "funding_enabled": doc.get("funding_enabled"), "chain_answer": doc,
-            "units": "rate_per_interval_pct is a percentage per interval; a positive rate means longs pay shorts",
-            "source": source(f)}
+    rate = (rate8 / 10 ** 6) if isinstance(rate8, int) else doc.get("rate_pct")
+    iv = doc.get("interval_secs")
+    out = {"network": chain.network, "market": pair.get("symbol"), "pair_id": pair.get("pair_id"),
+           "rate_per_interval_pct": rate, "interval_secs": iv, "next_funding": doc.get("next_funding"),
+           "funding_enabled": doc.get("funding_enabled"), "chain_answer": doc,
+           "units": "rate_per_interval_pct is a percentage per interval; a positive rate means longs pay shorts; "
+                    "history is oldest first",
+           "source": source(f)}
+    n = params.get("history")
+    if n is not None:
+        try:
+            n = max(1, min(400, int(n)))
+        except (TypeError, ValueError, OverflowError):
+            raise Refusal("history must be a number of past settlements, 1-400")
+        rows, hr = reads.funding_history(chain, pair, n)
+        out["history"] = rows
+        out["source"] = source(f, hr)
+    every = f"{iv // 3600} h" if isinstance(iv, int) and iv % 3600 == 0 else (f"{iv} s" if iv else "interval")
+    who = "longs pay shorts" if (rate or 0) > 0 else ("shorts pay longs" if (rate or 0) < 0 else "no one pays")
+    out["summary"] = (f"{pair.get('symbol')} funding: {rate:+.6f}% per {every} ({who})." if isinstance(rate, (int, float))
+                      else f"{pair.get('symbol')}: the funding rate is not published.")
+    if out.get("history"):
+        vals = [r["rate_pct"] for r in out["history"] if r["rate_pct"] is not None]
+        if vals:
+            out["summary"] += f" Average over the last {len(vals)} settlements: {sum(vals) / len(vals):+.6f}%."
+    return out
 
 
 def get_balance(chain, cfg, params):
@@ -280,7 +324,10 @@ def get_balance(chain, cfg, params):
         raise Refusal(f"the network did not return balances for this account ({eq['status']}, {bal['status']})",
                       readings={"source": source(eq, bal)})
     e = eq["json"] if eq.ok else {}
-    return {"network": chain.network, "address": address,
+    return {"summary": (f"{short(address)}: account value {usd(_units(e.get('total_equity'), USDC_6DEC))}, "
+                        f"{usd(_units(e.get('free_balance'), USDC_6DEC))} available to trade." if eq.ok
+                        else f"{short(address)}: balances read from the balance route only."),
+            "network": chain.network, "address": address,
             "usdc": {"available_to_trade": _units(e.get("free_balance"), USDC_6DEC),
                      "in_positions": _units(e.get("in_positions"), USDC_6DEC),
                      "reserved_by_orders": _units(e.get("reserved_orders"), USDC_6DEC),
@@ -302,7 +349,10 @@ def get_positions(chain, cfg, params):
         m = by_id.get(it.get("pair_id"))
         if m and not it.get("symbol"):
             it["symbol"] = m.get("symbol")
-    return {"network": chain.network, "address": address, "count": len(items), "positions": items,
+    return {"summary": f"{short(address)} has {len(items)} open position{'s' if len(items) != 1 else ''}"
+                       + (": " + ", ".join(f"{it.get('symbol')} {'long' if it.get('is_long') else 'short'}" for it in items[:8])
+                          if items else "") + ". get_account adds entry, mark, PnL and liquidation prices.",
+            "network": chain.network, "address": address, "count": len(items), "positions": items,
             "note": "Fields are the chain's own. Prices are 8-decimal integers where named _8dec, sizes 18-decimal "
                     "where named _18dec.",
             "source": source(pos, chain.markets())}
@@ -319,11 +369,13 @@ def get_orders(chain, cfg, params):
         m = by_id.get(it.get("pair_id"))
         if m and not it.get("symbol"):
             it["symbol"] = m.get("symbol")
-    return {"network": chain.network, "address": address, "count": len(items), "orders": items,
+    return {"summary": f"{short(address)} has {len(items)} resting order{'s' if len(items) != 1 else ''}.",
+            "network": chain.network, "address": address, "count": len(items), "orders": items,
             "source": source(o, chain.markets())}
 
 
 # ── agents: policy and usage, as the chain stores them ───────────────────────
+AGENT_RECORDS = 10
 POLICY_KEYS = ("status", "mandate", "expires_ms", "policy", "policy_v1", "market_limits", "name", "display_name")
 RISK_KEYS = ("accounting", "risk_v1", "lock_active", "expires_ms", "status")
 
@@ -336,14 +388,30 @@ def _agent_view(chain, params, kind, keys, note):
         raise Refusal(f"{agent!r} is not an agent address", remedy="Omit agent to list every agent of this owner.")
     r = chain.agent(owner, str(agent)) if agent is not None else chain.agents(owner)
     if not r.ok:
-        return {"available": False, "owner": owner, "reason": f"the agent route answered {r['status']}",
+        return {"summary": f"The agent records of {short(owner)} could not be read ({r['status']}).",
+                "available": False, "owner": owner, "reason": f"the agent route answered {r['status']}",
                 "note": f"No {kind} is returned from defaults or memory.", "source": source(r)}
     doc = r["json"] or {}
     records = ([] if doc.get("found") is False else [doc]) if agent is not None else list(doc.get("agents") or [])
-    return {"available": True, "network": chain.network, "owner": owner, "agent": agent,
+    if agent is None:
+        # the list carries only yes/no flags (has_policy_v1); each agent's own record carries its policy and market
+        # limits — read it (the first AGENT_RECORDS agents), and say so when one could not be read
+        full = []
+        for rec in records[:AGENT_RECORDS]:
+            a = rec.get("agent") if isinstance(rec, dict) else None
+            one = chain.agent(owner, str(a)) if isinstance(a, str) and ADDRESS.match(a) else None
+            full.append(one["json"] if one is not None and one.ok and isinstance(one["json"], dict) and one["json"].get("found") is not False
+                        else {**rec, "record_unreadable": True})
+        records = full + records[AGENT_RECORDS:]
+    sw = read_switch(chain)
+    return {"summary": f"{short(owner)}: {len(records)} agent record{'s' if len(records) != 1 else ''}; the chain "
+                       + ("enforces agent policies now." if sw.get("active") is True else
+                          "does not enforce agent policies yet." if sw.get("established") else
+                          "cannot vouch for the agent policy switch right now."),
+            "available": True, "network": chain.network, "owner": owner, "agent": agent,
             "count": doc.get("count", len(records)),
             "agents": [{"record": rec, f"{kind}_fields_present": sorted(k for k in rec if k in keys)} for rec in records],
-            "policy_switch": read_switch(chain),
+            "policy_switch": sw,
             "enforced_by": "the chain, checked by every validator. This server enforces nothing; it only refuses early.",
             "note": note + " Fields are the chain's own, unchanged. An empty list means this owner has registered no "
                            "agent — not that no limits apply.",
@@ -475,6 +543,8 @@ def place_order(chain, cfg, params):
         price = float(params.get("price")) if otype == 1 else 0.0
     except (TypeError, ValueError):
         raise Refusal("size, price and leverage must be numbers")
+    if not all(math.isfinite(x) for x in (size, price, leverage)):
+        raise Refusal("size, price and leverage must be finite numbers")
     if size <= 0 or leverage < 1 or (otype == 1 and price <= 0):
         raise Refusal("size must be above 0, leverage at least 1, and a limit order needs a price above 0")
 
@@ -552,7 +622,7 @@ def refusal_of(chain, agent, nonce, wait_s=None, step=0.5):
 def cancel_order(chain, cfg, params):
     try:
         order_id = int(params.get("order_id"))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise Refusal("order_id must be the chain's order id (get_orders lists them)")
 
     def do(signer, agent, pair):
@@ -564,50 +634,123 @@ def cancel_order(chain, cfg, params):
 
 
 # ── schemas ──────────────────────────────────────────────────────────────────
-ADDR = {"type": "string", "description": "0x-prefixed 20-byte account address"}
-MARKET = {"symbol": {"type": "string", "description": "market symbol as get_markets lists it, e.g. ETHUSDT or ETH"},
-          "pair_id": {"type": "integer", "description": "or the market's pair id"}}
-RO = {"readOnlyHint": True, "openWorldHint": True}
+ADDR = {"type": "string", "description": "0x-prefixed 20-byte account address (0x followed by 40 hex characters)",
+        "pattern": "^0x[0-9a-fA-F]{40}$"}
+MARKET = {"symbol": {"type": "string", "description": "market symbol as get_markets lists it, e.g. BTC, ETH or ETHUSDT"},
+          "pair_id": {"type": "integer", "description": "or the market's pair id, e.g. 1"}}
+RO = {"readOnlyHint": True, "openWorldHint": True, "idempotentHint": True}
+SEASON = {"season_id": {"type": "integer", "description": "a season number (default: the current season)"}}
+
+
+def _t(name, title, description, properties=None, required=None, handler=None):
+    schema = {"type": "object", "properties": properties or {}}
+    if required:
+        schema["required"] = required
+    return {"name": name, "title": title, "description": description, "inputSchema": schema,
+            "annotations": {**RO, "title": title}, "handler": handler}
+
 
 TOOLS = [
-    {"name": "get_network",
-     "description": "Which Vordium network this server reads, checked against the network itself, and the facts the "
-                    "network vouches for right now (chain id, genesis, validators, whether trading, deposits and agent "
-                    "trading are on). Call this first.",
-     "inputSchema": {"type": "object", "properties": {}}, "annotations": RO, "handler": get_network},
-    {"name": "get_markets",
-     "description": "Every market the network lists, with its state, leverage, fees and trading rules (tick, lot, "
-                    "minimum size), as published now.",
-     "inputSchema": {"type": "object", "properties": {}}, "annotations": RO, "handler": get_markets},
-    {"name": "get_oracle", "description": "Oracle and mark prices, for every market or one.",
-     "inputSchema": {"type": "object", "properties": dict(MARKET)}, "annotations": RO, "handler": get_oracle},
-    {"name": "get_orderbook", "description": "Resting bids and asks for one market, best first.",
-     "inputSchema": {"type": "object", "properties": {**MARKET, "depth": {"type": "integer", "description": "levels per side, 1-100 (default 20)"}}},
-     "annotations": RO, "handler": get_orderbook},
-    {"name": "get_funding", "description": "The funding rate, interval and next settlement for one market.",
-     "inputSchema": {"type": "object", "properties": dict(MARKET)}, "annotations": RO, "handler": get_funding},
-    {"name": "get_balance", "description": "An account's USDC: available to trade, in positions, reserved by orders, unrealized PnL.",
-     "inputSchema": {"type": "object", "properties": {"address": ADDR}, "required": ["address"]},
-     "annotations": RO, "handler": get_balance},
-    {"name": "get_positions", "description": "An account's open positions, with market symbols.",
-     "inputSchema": {"type": "object", "properties": {"address": ADDR}, "required": ["address"]},
-     "annotations": RO, "handler": get_positions},
-    {"name": "get_orders", "description": "An account's resting orders, with their order ids.",
-     "inputSchema": {"type": "object", "properties": {"address": ADDR}, "required": ["address"]},
-     "annotations": RO, "handler": get_orders},
-    {"name": "get_policy",
-     "description": "Each agent's policy and market limits as the chain stores them, and whether the network enforces "
-                    "them now (its agent policy switch).",
-     "inputSchema": {"type": "object", "properties": {"address": {**ADDR, "description": "the owner account"},
-                                                      "agent": {"type": "string", "description": "optional agent address"}},
-                     "required": ["address"]},
-     "annotations": RO, "handler": get_policy},
-    {"name": "get_risk", "description": "Each agent's usage against its policy, as the chain accounts it.",
-     "inputSchema": {"type": "object", "properties": {"address": {**ADDR, "description": "the owner account"},
-                                                      "agent": {"type": "string", "description": "optional agent address"}},
-                     "required": ["address"]},
-     "annotations": RO, "handler": get_risk},
-    {"name": "place_order",
+    _t("get_status", "Network status",
+       "Is the network live: block height, blocks per second, validators agreeing, and whether trading and deposits "
+       "are open. Ask: \"Is Vordium up right now?\"", handler=reads.get_status),
+    _t("get_network", "Network identity",
+       "Which Vordium network this server reads, checked against the network itself, and the facts it vouches for "
+       "(chain id, genesis, finalized block, agent trading on or off). Ask: \"Which network am I connected to?\"",
+       handler=get_network),
+    _t("get_markets", "Markets",
+       "Every market the network lists, with its state, leverage, fees and trading rules (tick, lot, minimum size). "
+       "Ask: \"Which markets can I trade?\"", handler=get_markets),
+    _t("get_fees", "Fees and margins",
+       "Maker and taker fees, maximum leverage, initial and maintenance margin and the liquidation fee, for every "
+       "market or one. Ask: \"What does it cost to trade BTC with 10x?\"", dict(MARKET), handler=reads.get_fees),
+    _t("get_oracle", "Prices",
+       "Oracle and mark prices, for every market or one. Ask: \"What is the ETH price?\"", dict(MARKET),
+       handler=get_oracle),
+    _t("get_orderbook", "Order book",
+       "Resting bids and asks for one market, best first, with the spread. Ask: \"How deep is the BTC book?\"",
+       {**MARKET, "depth": {"type": "integer", "description": "levels per side, 1-100 (default 20)", "minimum": 1, "maximum": 100}},
+       handler=get_orderbook),
+    _t("get_candles", "Candles",
+       "Price candles (open, high, low, close, volume) for one market. Ask: \"How did ETH move over the last day?\"",
+       {**MARKET, "resolution": {"type": "string", "enum": ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "3D", "1W", "1M"],
+                                 "description": "candle length (default 1h)"},
+        "price": {"type": "string", "enum": ["mark", "last"], "description": "mark price (default) or last traded price"},
+        "limit": {"type": "integer", "description": "number of candles, 1-500 (default 24)", "minimum": 1, "maximum": 500}},
+       handler=reads.get_candles),
+    _t("get_trades", "Recent trades",
+       "The latest trades in one market: time, side, price, size and value. Ask: \"Show the last 10 BTC trades.\"",
+       {**MARKET, "limit": {"type": "integer", "description": "1-100 (default 20)", "minimum": 1, "maximum": 100}},
+       handler=reads.get_trades),
+    _t("get_funding", "Funding",
+       "The funding rate, interval and next settlement for one market, and optionally its past settlements. Ask: "
+       "\"What has ETH funding been over the last day?\"",
+       {**MARKET, "history": {"type": "integer", "description": "also return this many past settlements, 1-400",
+                              "minimum": 1, "maximum": 400}}, handler=get_funding),
+    _t("get_account", "Account",
+       "One account at a glance: USDC balances, positions with entry, mark, unrealized PnL and liquidation price, and "
+       "open orders. Ask: \"Check my account 0x…\"", {"address": ADDR}, ["address"], reads.get_account),
+    _t("get_fills", "Trade history",
+       "An account's recent trades with price, size, fee and realized PnL, as the explorer records them. Ask: "
+       "\"What did 0x… trade today?\"",
+       {"address": ADDR, "limit": {"type": "integer", "description": "1-50 (default 20)", "minimum": 1, "maximum": 50}},
+       ["address"], reads.get_fills),
+    _t("get_balance", "Balance",
+       "An account's USDC: available to trade, in positions, reserved by orders, unrealized PnL. Ask: \"How much "
+       "USDC does 0x… have?\"", {"address": ADDR}, ["address"], get_balance),
+    _t("get_positions", "Positions",
+       "An account's open positions as the chain stores them. Ask: \"What positions does 0x… hold?\"",
+       {"address": ADDR}, ["address"], get_positions),
+    _t("get_orders", "Open orders",
+       "An account's resting orders, with their order ids. Ask: \"Which orders does 0x… have open?\"",
+       {"address": ADDR}, ["address"], get_orders),
+    _t("get_agents", "Agents",
+       "An owner's AI agents: status, limits and policy, usage, and each agent's latest actions. Ask: \"What are my "
+       "agents doing?\"", {"address": {**ADDR, "description": "the owner account"}}, ["address"],
+       reads.get_agents),
+    _t("get_policy", "Agent policy",
+       "Each agent's policy and market limits as the chain stores them, and whether the network enforces them now. "
+       "Ask: \"What limits does my agent trade under?\"",
+       {"address": {**ADDR, "description": "the owner account"},
+        "agent": {"type": "string", "description": "optional agent address"}}, ["address"], get_policy),
+    _t("get_risk", "Agent usage",
+       "Each agent's usage against its policy, as the chain accounts it. Ask: \"How much of its daily loss limit has "
+       "my agent used?\"", {"address": {**ADDR, "description": "the owner account"},
+                              "agent": {"type": "string", "description": "optional agent address"}}, ["address"], get_risk),
+    _t("get_tiers", "Tiers",
+       "Agent limits by tier and the referral tier table, where the network serves them. Ask: \"How many agents can "
+       "each tier run?\"", handler=reads.get_tiers),
+    _t("get_season", "Rewards season",
+       "The current rewards season: status, VORD budget, rules, participants and how many qualify. Ask: \"What is "
+       "the current season?\"", dict(SEASON), handler=reads.get_season),
+    _t("get_points", "Points",
+       "An address's season points by source, its rank, whether it qualifies and its VORD estimate. Ask: \"What's my "
+       "rank in the season?\"", {"address": ADDR, **SEASON}, ["address"], reads.get_points),
+    _t("get_leaderboard", "Leaderboard",
+       "The season's points leaderboard, or the trading leaderboard by PnL, ROI or volume. Ask: \"Who leads the "
+       "season?\"",
+       {"board": {"type": "string", "enum": ["points", "trading"], "description": "points (default) or trading"},
+        "limit": {"type": "integer", "description": "1-100 (default 10)", "minimum": 1, "maximum": 100},
+        "window": {"type": "string", "enum": ["24h", "7d", "30d", "all"], "description": "trading board only (default 7d)"},
+        "sort": {"type": "string", "enum": ["pnl", "roi", "volume"], "description": "trading board only (default pnl)"},
+        **SEASON}, handler=reads.get_leaderboard),
+    _t("get_referrals", "Referrals",
+       "An address's referral code, tier, referred volume and earnings. Ask: \"How much have my referrals earned?\"",
+       {"address": ADDR}, ["address"], reads.get_referrals),
+    _t("get_tx", "Transaction",
+       "One EVM transaction by hash: block, sender, receiver, value and result, with its explorer link. The hash is "
+       "sent to the explorer to look it up, so give only a transaction hash, never a key. Ask: \"Explain transaction "
+       "0x…\"",
+       {"hash": {"type": "string", "description": "0x-prefixed 32-byte transaction hash", "pattern": "^0x[0-9a-fA-F]{64}$"}},
+       ["hash"], reads.get_tx) | {"hash_args": ("hash",)},
+    _t("get_block", "Block",
+       "One block by height: time, proposer, operations, with its explorer link. Ask: \"What happened in block "
+       "152,000,000?\"", {"height": {"type": "integer", "description": "block number", "minimum": 0}}, ["height"],
+       reads.get_block),
+    _t("get_address", "Address",
+       "An address summary: account value, open positions, agents and EVM transactions, with its explorer link. Ask: "
+       "\"Look up 0x…\"", {"address": ADDR}, ["address"], reads.get_address),
+    {"name": "place_order", "title": "Place order",
      "description": "Place a market or limit order as the configured agent. Signed on this machine with the agent key "
                     "set in the server's configuration; refused before anything is signed while the network reports "
                     "agent trading off. The chain enforces the agent's policy and limits.",
@@ -622,8 +765,8 @@ TOOLS = [
          "required": ["side", "size"]},
      "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
      "handler": place_order, "write": True},
-    {"name": "cancel_order", "description": "Cancel one of the configured owner's resting orders, as the agent. Same "
-                                            "gate as place_order.",
+    {"name": "cancel_order", "title": "Cancel order",
+     "description": "Cancel one of the configured owner's resting orders, as the agent. Same gate as place_order.",
      "inputSchema": {"type": "object", "properties": {"order_id": {"type": "integer"}}, "required": ["order_id"]},
      "annotations": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True},
      "handler": cancel_order, "write": True},
@@ -639,9 +782,11 @@ def call(chain, cfg, name, params):
     tool = next((t for t in listed_tools(cfg) if t["name"] == name), None)
     if tool is None:
         raise Refusal(f"no tool named {name!r} on this server", remedy="Call tools/list.")
-    reject_key_material(params)
+    reject_key_material(params, tool.get("hash_args", ()))
     try:
         return tool["handler"](chain, cfg, params or {})
+    except NotServed as e:
+        raise Refusal(f"{e}", remedy="Nothing is filled in from memory. get_status shows what the network serves now.")
     except ChainUnreachable as e:
         raise Refusal(f"the network could not be read: {e}",
                       remedy="No value is returned from memory. Try again when the network answers.")

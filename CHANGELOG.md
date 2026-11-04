@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0
+- New read tools: `get_status`, `get_fees`, `get_candles`, `get_trades`, `get_account`, `get_fills`, `get_agents`,
+  `get_tiers`, `get_season`, `get_points`, `get_leaderboard`, `get_referrals`, `get_tx`, `get_block`, `get_address`.
+  `get_funding` takes `history` for past settlements.
+- Every result starts with `summary`, one plain sentence, next to the figures and their units. Tools carry titles and
+  examples.
+- Prompts: market overview, check an account, season standings, explain a transaction, compare markets.
+- Resources: the network spec, a fees table and documentation links.
+- HTTP: `--hosted` for a public read-only server behind a proxy; `--burst`; `--allow-origin '*'`; CORS preflight;
+  a rate-limited request is answered with how long to wait; `/health` carries counters per tool. Over HTTP the server
+  gives each connection an `Mcp-Session-Id` at `initialize` and limits each connection, with a looser cap per address.
+- MCP protocol 2025-11-25 alongside 2025-06-18, 2025-03-26 and 2024-11-05. A client asking for another version is
+  offered the newest; the `MCP-Protocol-Version` header is never refused.
 
 ## 0.3.1
 - `place_order` reports an order the chain received and then refused: the answer carries `accepted: false`,

@@ -16,6 +16,8 @@ NETWORKS = {
         "spec": "https://testnet.vordex.xyz/network-spec.json",
         "truth": "https://rpc-testnet.vordium.com/truth/v1",
         "app": "https://testnet.vordex.xyz",
+        "candles": "https://testnet.vordex.xyz",
+        "explorer": "https://testnet.vordscan.io",
         "testnet": True,
     },
     "mainnet": {
@@ -24,6 +26,8 @@ NETWORKS = {
         "spec": "https://rpc.vordium.com/network-spec.json",
         "truth": "https://rpc.vordium.com/truth/v1",
         "app": "https://app.vordex.xyz",
+        "candles": "https://app.vordex.xyz",
+        "explorer": "https://vordscan.io",
         "testnet": False,
     },
 }

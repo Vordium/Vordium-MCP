@@ -5,7 +5,7 @@ when a tool is called. If a value cannot be read, the tool says so; it is never 
 
 The transport is injectable (``fetch=``), so the tests drive every branch without a network.
 """
-import json, time, urllib.error, urllib.request
+import json, threading, time, urllib.error, urllib.request
 
 from . import __version__
 
@@ -47,29 +47,92 @@ class Chain:
     """Reads one network. ``rest`` is the base of the node's REST routes, ``spec`` the network's published spec and
     ``truth`` the network's own answer (several validators read at once and compared)."""
 
-    def __init__(self, network, rest, spec, truth, fetch=None, ttl=5.0, clock=time.time):
+    MAX_CACHED = 4000
+    MAX_CACHED_BYTES = 6 * 2 ** 20      # bodies kept at once; a public server must not grow without bound
+    MAX_ENTRY_BYTES = 2 ** 20           # a larger body is answered but not kept
+
+    def __init__(self, network, rest, spec, truth, fetch=None, ttl=5.0, clock=time.time, short_ttl=0.0, links=None):
         self.network = network
         self.rest = rest.rstrip("/")
         self.spec_url = spec
         self.truth_url = truth
+        self.links = dict(links or {})
         self._fetch = fetch or _http
         self.ttl = ttl
+        self.short_ttl = short_ttl          # a read asked uncached is still shared this long (a public server: 2 s)
         self.clock = clock
         self._cache = {}
+        self._bytes = 0
+        self._lock = threading.Lock()
+        self._inflight = {}                 # url -> Event: one read of a URL at a time; others wait for its answer
+        self.fetches = 0                    # reads that reached the network (not served from the cache)
 
-    def _read_url(self, url, cache=True):
+    def _read_url(self, url, cache=True, ttl=None):
         now = self.clock()
-        hit = self._cache.get(url)
-        if cache and hit and now - hit["at"] < self.ttl:
-            return hit["read"]
+        keep = (self.ttl if ttl is None else ttl) if cache else self.short_ttl
+        with self._lock:
+            hit = self._cache.get(url)
+            if keep > 0 and hit and now - hit["at"] < keep:
+                return hit["read"]
+            rec = self._inflight.get(url) if keep > 0 else None
+            if keep > 0 and rec is None:
+                self._inflight[url] = mine = {"ev": threading.Event(), "read": None, "error": None}
+        if rec is not None:                     # the same read is already on its way: take its answer, whatever its age
+            if rec["ev"].wait(15):
+                if rec["read"] is not None:
+                    return rec["read"]
+                if rec["error"] is not None:
+                    raise rec["error"]
+            return self._fetch_now(url, keep)   # it took too long: read it here
+        if keep <= 0:
+            return self._fetch_now(url, keep)
+        try:
+            mine["read"] = self._fetch_now(url, keep)
+            return mine["read"]
+        except ChainUnreachable as e:
+            mine["error"] = e
+            raise
+        finally:
+            with self._lock:
+                self._inflight.pop(url, None)
+            mine["ev"].set()
+
+    def _fetch_now(self, url, keep):
+        now = self.clock()
         status, text = self._fetch("GET", url)
         try:
             doc = json.loads(text)
         except Exception:
             doc = None
         r = Read(url=url, status=status, json=doc, text=None if doc is not None else text[:300], read_at=iso(now))
-        self._cache[url] = {"at": now, "read": r}
+        with self._lock:
+            self.fetches += 1
+            self._store(url, now, r, len(text or ""), keep)
         return r
+
+    def _store(self, url, now, r, size, keep):
+        """Keep a read only as long as it can be served again; drop what has expired on every insert, and the oldest
+        when the bodies kept pass MAX_CACHED_BYTES. Called with the lock held."""
+        old = self._cache.pop(url, None)
+        if old:
+            self._bytes -= old["size"]
+        horizon = max(self.ttl, self.short_ttl, 30.0)
+        for k in [k for k, v in self._cache.items() if now - v["at"] >= horizon]:
+            self._bytes -= self._cache.pop(k)["size"]
+        if size > self.MAX_ENTRY_BYTES or (keep <= 0 and url not in (self.spec_url, self.truth_url)):
+            return
+        self._cache[url] = {"at": now, "read": r, "size": size}
+        self._bytes += size
+        while self._cache and (self._bytes > self.MAX_CACHED_BYTES or len(self._cache) > self.MAX_CACHED):
+            k = min(self._cache, key=lambda k: self._cache[k]["at"])
+            self._bytes -= self._cache.pop(k)["size"]
+
+    def read_link(self, name, path, cache=True, ttl=None):
+        """A read from another public address of this network (the explorer, the app's own services), by name."""
+        base = self.links.get(name)
+        if not base:
+            return None
+        return self._read_url(base.rstrip("/") + path, cache, ttl)
 
     def read(self, path, cache=True):
         return self._read_url(self.rest + path, cache)

@@ -1,8 +1,13 @@
 # Vordium MCP server
 
-Connect any AI that speaks the [Model Context Protocol](https://modelcontextprotocol.io) — Claude, Cursor, or your own
-agent — to [Vordium](https://vordium.com). It can read markets, prices, order books, funding and accounts, and, once
-the network switches agent trading on, place and cancel orders as an agent whose limits the chain enforces.
+Connect any AI that speaks the [Model Context Protocol](https://modelcontextprotocol.io) — Claude, ChatGPT, Cursor, or
+your own agent — to [Vordium](https://vordium.com). It can read markets, prices, order books, funding, accounts, agents,
+rewards and the explorer, and, once the network switches agent trading on, place and cancel orders as an agent whose
+limits the chain enforces.
+
+**No install:** add `https://mcp.vordium.com/testnet/mcp` to your client as a remote MCP server (streamable HTTP, no
+account). That server is read-only; [mcp.vordium.com](https://mcp.vordium.com) has the steps for each client. Run this
+package on your own machine to trade as an agent.
 
 - **Testnet first.** The server reads the Vordium testnet unless you name the main network. Testnet tokens have no value.
 - **Runs on your machine.** It talks to your MCP client over stdio. No account, no API key.
@@ -79,18 +84,37 @@ Then ask, for example: *"What does the ETH order book on Vordium look like?"* or
 
 | Tool | What it answers |
 | --- | --- |
-| `get_network` | Which network this is (checked against the network itself) and what the network vouches for now: chain id, genesis, validators, and whether trading, deposits and agent trading are on |
+| `get_status` | Whether the network is live: block height, blocks per second, validators agreeing, trading and deposits open |
+| `get_network` | Which network this is (checked against the network itself) and what the network vouches for now |
 | `get_markets` | Every market with its state, leverage, fees and trading rules |
+| `get_fees` | Maker and taker fees, maximum leverage, initial and maintenance margin, liquidation fee |
 | `get_oracle` | Oracle and mark prices, for every market or one |
 | `get_orderbook` | Bids and asks for one market, best first |
-| `get_funding` | The funding rate, interval and next settlement for one market |
+| `get_candles` | Price candles for one market |
+| `get_trades` | The latest trades in one market |
+| `get_funding` | The funding rate, interval and next settlement for one market, and its past settlements |
+| `get_account` | Balances, positions with entry, mark, PnL and liquidation price, and open orders |
+| `get_fills` | An account's recent trades with fees and realized PnL |
 | `get_balance` | An account's USDC: available to trade, in positions, reserved by orders, unrealized PnL |
 | `get_positions` | An account's open positions |
 | `get_orders` | An account's resting orders |
+| `get_agents` | An owner's agents: status, limits, usage and latest actions |
 | `get_policy` | Each agent's policy and market limits as the chain stores them, and whether the network enforces them now |
 | `get_risk` | Each agent's usage against its policy |
+| `get_tiers` | Agent limits by tier and the referral tier table, where the network serves them |
+| `get_season` | The current rewards season: status, budget, rules, participants |
+| `get_points` | An address's season points by source, rank, whether it qualifies, VORD estimate |
+| `get_leaderboard` | The season's points leaderboard, or the trading leaderboard |
+| `get_referrals` | An address's referral code, tier, referred volume and earnings |
+| `get_tx` | One EVM transaction by hash, with its explorer link |
+| `get_block` | One block by height, with its explorer link |
+| `get_address` | An address summary, with its explorer link |
 | `place_order` | A market or limit order, signed on your machine with the agent key |
 | `cancel_order` | Cancel a resting order, as the agent |
+
+Every result starts with `summary`, one plain sentence, followed by the figures and the units they are in. The server
+also offers ready-made prompts (market overview, check an account, season standings, explain a transaction, compare
+markets) and resources (the network spec, a fees table, documentation links).
 
 A tool that cannot read the network says so; it never answers from memory. A refusal comes back as a tool error that
 names the readings behind it, and says that nothing was signed or sent.
@@ -145,9 +169,13 @@ still checks that the node serves the network you named.
 
 `vordium-mcp --http localhost:8770` serves the read tools over streamable HTTP at `/mcp`, for clients that connect to a
 URL. It lists no trading tools and takes no key or trading flag. It answers JSON (no event stream), limits each client
-to `--rate-per-minute` requests (default 120), refuses browser origins unless allowed with `--allow-origin`, and keeps no
-request log. Put it behind a proxy for anything beyond your own machine, and pass `--trust-proxy` there so the limit
-applies per client.
+to `--rate-per-minute` requests (default 120, `--burst` at once), refuses browser origins unless allowed with
+`--allow-origin`, and keeps no request log. Put it behind a proxy for anything beyond your own machine, and pass
+`--trust-proxy` there so the limit applies per client. `--hosted` sets it up as a public server behind a proxy: any
+origin, 60 requests a minute per connection with bursts of 20 (a connection is the `Mcp-Session-Id` the server gives
+at `initialize`; a client that sends none is counted by its address), at most 20 times that per address across its
+connections, and every read shared for at least 2 seconds. `/health`
+answers the server's counters (calls per tool; no address or argument).
 
 ## Settings
 
@@ -159,8 +187,10 @@ applies per client.
 | `--owner 0x…` | none |
 | `--agent-key-file PATH` | none |
 | `--http HOST:PORT` | off (stdio) |
-| `--rate-per-minute N` | 120 |
-| `--allow-origin URL` | none |
+| `--rate-per-minute N` | 120 (hosted 60) |
+| `--burst N` | the per-minute rate (hosted 20) |
+| `--allow-origin URL` | none (`*` allows any) |
+| `--hosted` | off |
 
 `vordium-mcp --help` lists them, with the environment form of each.
 

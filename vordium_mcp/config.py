@@ -21,8 +21,11 @@ class Config:
     read_only: bool = False
     http: Optional[str] = None
     rate_per_minute: int = 120
+    burst: int = 0
     allow_origins: tuple = ()
     trust_proxy: bool = False
+    hosted: bool = False
+    short_cache_s: float = 0.0
 
 
 def parser():
@@ -31,7 +34,8 @@ def parser():
         description="Vordium MCP server. Runs on your machine over stdio; reads the Vordium testnet unless told otherwise.",
         epilog="Each setting can also come from the environment: VORDIUM_MCP_NETWORK, VORDIUM_MCP_REST, "
                "VORDIUM_MCP_ALLOW_TRADING=1, VORDIUM_MCP_OWNER, VORDIUM_MCP_AGENT_KEY_FILE, VORDIUM_MCP_HTTP, "
-               "VORDIUM_MCP_RATE_PER_MINUTE, VORDIUM_MCP_ALLOW_ORIGINS (comma-separated). A flag wins over the environment.")
+               "VORDIUM_MCP_RATE_PER_MINUTE, VORDIUM_MCP_BURST, VORDIUM_MCP_ALLOW_ORIGINS (comma-separated), VORDIUM_MCP_HOSTED=1. "
+               "A flag wins over the environment.")
     p.add_argument("--network", choices=("testnet", "mainnet"),
                    help="which network to read (default testnet; mainnet only when named here or in VORDIUM_MCP_NETWORK)")
     p.add_argument("--rest", help="your own node's REST base instead of the network's public one")
@@ -44,11 +48,17 @@ def parser():
     p.add_argument("--agent-key-file", help="file holding the agent's private key (mode 600); read only when signing")
     p.add_argument("--http", metavar="HOST:PORT",
                    help="serve read-only over streamable HTTP at /mcp instead of stdio (no write tools, no keys)")
-    p.add_argument("--rate-per-minute", type=int, help="HTTP: requests per client per minute (default 120)")
+    p.add_argument("--rate-per-minute", type=int, help="HTTP: requests per minute per client address (default 120); hosted: per "
+                                                       "connection (60), with 20 times that per address")
+    p.add_argument("--burst", type=int, help="HTTP: requests a client may send at once before the per-minute rate "
+                                             "applies (default: the per-minute rate; hosted 20)")
     p.add_argument("--allow-origin", action="append", default=None,
-                   help="HTTP: a browser origin allowed to call /mcp (repeatable; none by default)")
+                   help="HTTP: a browser origin allowed to call /mcp (repeatable; none by default; * allows any)")
     p.add_argument("--trust-proxy", action="store_true",
                    help="HTTP: take the client address from CF-Connecting-IP / X-Forwarded-For (behind a proxy only)")
+    p.add_argument("--hosted", action="store_true",
+                   help="HTTP: a public read-only server behind a proxy: any origin, 60 requests a minute per client "
+                        "(burst 20), the client address from the proxy, every read cached for at least 2 seconds")
     p.add_argument("--version", action="store_true", help="print the version and exit")
     return p
 
@@ -69,10 +79,18 @@ def load(argv=None, env=None):
             raise ConfigError("the HTTP server is read-only: it takes no trading flag and no key")
         if not re.match(r"^[\w.\-\[\]:]+:\d{1,5}$", http):
             raise ConfigError("--http takes HOST:PORT, e.g. localhost:8770")
-    rate = a.rate_per_minute or int(env.get("VORDIUM_MCP_RATE_PER_MINUTE") or 120)
+    hosted = a.hosted or str(env.get("VORDIUM_MCP_HOSTED", "")).strip().lower() in TRUE
+    if hosted and not http:
+        raise ConfigError("--hosted serves over HTTP: give --http HOST:PORT too")
+    rate = a.rate_per_minute or int(env.get("VORDIUM_MCP_RATE_PER_MINUTE") or (60 if hosted else 120))
     if rate < 1:
         raise ConfigError("--rate-per-minute must be at least 1")
+    burst = a.burst or int(env.get("VORDIUM_MCP_BURST") or (20 if hosted else rate))
+    if burst < 1:
+        raise ConfigError("--burst must be at least 1")
     origins = tuple(a.allow_origin or [o for o in str(env.get("VORDIUM_MCP_ALLOW_ORIGINS", "")).split(",") if o.strip()])
+    if hosted and not origins:
+        origins = ("*",)
     return a, Config(
         network=name,
         rest=(a.rest or env.get("VORDIUM_MCP_REST") or net["rest"]).rstrip("/"),
@@ -84,6 +102,9 @@ def load(argv=None, env=None):
         read_only=bool(http),
         http=http,
         rate_per_minute=rate,
+        burst=burst,
         allow_origins=tuple(o.strip() for o in origins),
-        trust_proxy=bool(a.trust_proxy),
+        trust_proxy=bool(a.trust_proxy) or hosted,
+        hosted=hosted,
+        short_cache_s=2.0 if hosted else 0.0,
     )
