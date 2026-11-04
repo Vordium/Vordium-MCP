@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.1
+- First PyPI release of the 0.4 line (same features as the hosted 0.4.0).
+
 ## 0.4.0
 - New read tools: `get_status`, `get_fees`, `get_candles`, `get_trades`, `get_account`, `get_fills`, `get_agents`,
   `get_tiers`, `get_season`, `get_points`, `get_leaderboard`, `get_referrals`, `get_tx`, `get_block`, `get_address`.
