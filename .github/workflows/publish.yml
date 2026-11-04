@@ -20,7 +20,7 @@ permissions:
 jobs:
   test:
     name: test suite (a failing suite cannot publish)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # Python 3.9 is not built for Ubuntu 26.04 (ubuntu-latest)
     strategy:
       matrix:
         python-version: ["3.9", "3.12"]
