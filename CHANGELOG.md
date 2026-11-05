@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0
+- Pre-trade check: before anything is signed, an order is judged against every rule the network runs on it — market
+  state and order types, lot, tick, smallest order, largest order and position, price band, margin with the fee,
+  reduce-only, open-order count, and the agent's own limits (markets, leverage, largest order and position, exposure,
+  daily loss and fee caps, worst price). An order that would be refused is not signed: the answer names each rule with
+  the numbers and ready fixes that pass. Rules the public reads cannot settle are listed under `not_checked`.
+- New tools `check_order` (the same check, nothing signed) and `my_buying_power` (largest order per side at a given
+  leverage, with the agent's limits). `check_order` takes the highest leverage the limits allow when none is named;
+  `place_order` keeps 1× as its default.
+- `vordium-mcp new-agent-key PATH` makes an agent key on this machine (file mode 600, never overwritten) and prints
+  only its address, to register in Vordex with its limits.
+- On the test network an agent trades without a session.
+
 ## 0.4.1
 - First PyPI release of the 0.4 line (same features as the hosted 0.4.0).
 

@@ -119,14 +119,20 @@ markets) and resources (the network spec, a fees table, documentation links).
 A tool that cannot read the network says so; it never answers from memory. A refusal comes back as a tool error that
 names the readings behind it, and says that nothing was signed or sent.
 
-## Trading as an agent
+## Trading as an agent (on your own computer, 24/7)
 
-An agent is a key that its owner registers on-chain, gives a session, and limits with a policy. See
-[Agents](https://docs.vordium.com/infrastructure/agents/) and [Session keys](https://docs.vordium.com/guides/session-keys/).
-The owner's own key never goes into this server.
+An agent is a key its owner registers on-chain and limits with a policy. The key is made on, and never leaves, the
+machine that runs this server; the owner's own key never goes into it. See
+[Agents](https://docs.vordium.com/infrastructure/agents/).
 
-1. Register the agent and create its session from the owner's wallet.
-2. Save the agent's private key in a file only you can read: `chmod 600 ~/.vordium/agent.key`.
+1. Make the agent key on this machine. Only its address is printed; the file is readable by you alone:
+
+   ```sh
+   uvx --from "vordium-mcp[trade]" vordium-mcp new-agent-key ~/.vordium/agent.key
+   ```
+
+2. In Vordex, open Agents → New agent → Use my own key, paste that address and set its limits (markets, largest order,
+   leverage, daily loss). Your wallet signs; the limits are stored on-chain.
 3. Start the server with trading allowed:
 
 ```json
@@ -141,18 +147,23 @@ The owner's own key never goes into this server.
 }
 ```
 
+Your AI app then trades through the agent whenever this computer is on, within the limits the chain holds.
+
 Before it signs, the server checks, in this order:
 
 1. The network reports agent trading on (`agent_policy_active`, read live from the network's own answer). If not,
    it refuses at once.
 2. You started it with `--allow-trading`, an owner and an agent key file.
-3. The key is a registered agent of that owner, not revoked, not expired, with a confirmed session, and is not the
-   owner's key.
+3. The key is a registered agent of that owner, not revoked, not expired, and is not the owner's key. (The main
+   network also asks for a confirmed session for the agent key; the test network takes the agent's own signature.)
 4. The network reports trading open, and the market is trading.
+5. The order passes every rule the network runs: the market's size steps and limits, the price band, the margin the
+   account has free, and the agent's own limits. An order the network would refuse is not signed; the answer names
+   each rule with the real numbers and fixes that pass.
 
-The chain then applies the agent's policy and limits on every validator. An order this server lets through can still
-be refused or dropped by the chain; the server returns the chain's answer unchanged and never reports a fill it did
-not see. Read `get_orders` and `get_positions` to see what was applied.
+`check_order` runs step 5 alone (nothing signed or sent) and `my_buying_power` shows, per market, the largest long and
+short at each allowed leverage. The chain then applies the agent's policy and limits on every validator and returns its
+answer unchanged; read `get_orders` and `get_positions` to see what was applied.
 
 ## The main network
 

@@ -11,6 +11,7 @@ Rules this file enforces:
 The limits an agent trades under are enforced by the chain, on every validator. This server only refuses early.
 """
 import math
+from . import pretrade
 import time
 import re
 
@@ -480,12 +481,13 @@ def _agent_ready(chain, cfg, signer):
         exp, now = rec.get("expires_ms"), chain.chain_time_ms()
         if isinstance(exp, int) and (exp == 0 or (now is not None and exp <= now)):
             blockers.append({"blocker": "agent expired", "detail": f"expires_ms {exp} at chain time {now}"})
-    s = chain.session_valid(cfg.owner, agent)
-    sv = s["json"] if s.ok and isinstance(s["json"], dict) else {}
-    readings["session"] = {**source(s)[0], "values": sv}
-    if not (sv.get("valid") is True and sv.get("confirmed") is True):
-        blockers.append({"blocker": "no confirmed session for the agent key",
-                         "detail": "the owner must create a session for the agent key before it can sign orders"})
+    if chain.network != "testnet":   # the test network takes an agent's own signature with no session; the main network
+        s = chain.session_valid(cfg.owner, agent)        # still asks for one
+        sv = s["json"] if s.ok and isinstance(s["json"], dict) else {}
+        readings["session"] = {**source(s)[0], "values": sv}
+        if not (sv.get("valid") is True and sv.get("confirmed") is True):
+            blockers.append({"blocker": "no confirmed session for the agent key",
+                             "detail": "the owner must create a session for the agent key before it can sign orders"})
     st = chain.status(cache=False)
     status = st["json"] if st.ok and isinstance(st["json"], dict) else None
     readings["status"] = source(st)[0]
@@ -497,7 +499,7 @@ def _agent_ready(chain, cfg, signer):
     return blockers, readings, agent
 
 
-def _write(chain, cfg, kind, params, do):
+def _write(chain, cfg, kind, params, do, precheck=None):
     network_identity(chain)
     if cfg.read_only:
         raise Refusal(f"{kind} is not available on a read-only server")
@@ -517,6 +519,8 @@ def _write(chain, cfg, kind, params, do):
         raise Refusal(f"{kind} refused: " + "; ".join(b["blocker"] for b in blockers),
                       readings={"blockers": blockers, **readings},
                       remedy="Each blocker names the reading it came from. Nothing was signed or sent.")
+    if precheck is not None:
+        precheck(agent, pair)                          # every network rule first: an order that would be refused is not signed
     answer = do(signer, agent, pair)
     code = answer.get("status_code") if isinstance(answer, dict) else None
     return {"network": chain.network, "sent": True, "agent": agent, "chain_status": code, "chain_answer": answer,
@@ -550,11 +554,26 @@ def place_order(chain, cfg, params):
 
     nonce = int(time.time() * 1000)                  # sent explicitly, so the chain's refusal record can be matched to it
 
+    def precheck(agent, pair):
+        try:
+            ctx = pretrade.Ctx(chain, cfg.owner, pair["pair_id"], agent)
+        except pretrade.Unreadable as e:             # an order is never signed unchecked
+            raise Refusal(f"place_order refused: the order could not be checked against the network ({e})",
+                          remedy="Nothing was signed or sent. Try again when the network answers.")
+        o = pretrade.snap(ctx, _chain_order(pair["pair_id"], params, side, otype, size, price, leverage))   # as the signer sends it
+        r = pretrade.check(ctx, o)
+        if not r["can_place"]:
+            raise Refusal("place_order refused before signing — the network would refuse it: "
+                          + "; ".join(f["words"] for f in r["failed"]),
+                          readings={"failed": r["failed"], "figures": r["figures"], "not_checked": r["not_checked"]},
+                          remedy="Fixes that pass: " + ("; ".join(f["label"] for f in r["fixes"] if f.get("passes")) or "none worked out")
+                                 + ". Nothing was signed or sent.")
+
     def do(signer, agent, pair):
         return signer.place(cfg, chain.rest, pair_id=pair["pair_id"], side=side, size=size, price=price,
                             leverage=leverage, order_type=otype, reduce_only=bool(params.get("reduce_only", False)),
                             post_only=bool(params.get("post_only", False)), client_nonce=nonce)
-    out = _write(chain, cfg, "place_order", params, do)
+    out = _write(chain, cfg, "place_order", params, do, precheck)
     if out.get("accepted"):
         why = refusal_of(chain, out.get("agent"), nonce)
         if why is not None:
@@ -566,6 +585,54 @@ def place_order(chain, cfg, params):
         _intake_refusal(chain, out)
     out["client_nonce"] = nonce
     return out
+
+
+def _chain_order(pair_id, params, side, otype, size, price, leverage):
+    """the order in the chain's units, as the pre-trade check reads it"""
+    from decimal import Decimal
+    return {"pair_id": pair_id, "side": "buy" if side == 0 else "sell", "size_18dec": int(Decimal(str(size)) * 10 ** 18),
+            "price_8dec": int(Decimal(str(price)) * 10 ** 8) if otype == 1 else 0, "order_type": "limit" if otype == 1 else "market",
+            "reduce_only": bool(params.get("reduce_only", False)), "post_only": bool(params.get("post_only", False)),
+            "leverage_bps": int(Decimal(str(leverage)) * 10000)}
+
+
+def check_order(chain, cfg, params):
+    """the pre-trade check for the configured owner (and its agent, when a key is set), nothing signed or sent"""
+    from . import signer
+    if not cfg.owner:
+        raise Refusal("check_order needs the owner account: start the server with --owner")
+    pair = _pair(chain, params, required=True)
+    side = SIDES.get(str(params.get("side", "")).strip().lower())
+    otype = TYPES.get(str(params.get("order_type", "limit")).strip().lower())
+    if side is None or otype is None:
+        raise Refusal("side is buy or sell; order_type is market or limit")
+    agent = signer.agent_address(cfg.agent_key_file) if cfg.agent_key_file else None
+    ctx = pretrade.Ctx(chain, cfg.owner, pair["pair_id"], agent)
+    lev = params.get("leverage")
+    leverage = float(lev) if lev not in (None, "") else (pretrade.leverage_cap(ctx) or 10000) / 10000
+    r = pretrade.check(ctx, _chain_order(pair["pair_id"], params, side, otype, float(params.get("size")),
+                                        float(params.get("price") or 0), leverage))
+    r["summary"] = ("The network would take it." if r["can_place"] else "The network would refuse it: "
+                    + "; ".join(f["words"] for f in r["failed"])) + " Nothing was signed or sent."
+    return r
+
+
+def my_buying_power(chain, cfg, params):
+    """per market: the largest long and short at each leverage the limits allow (free margin and the agent's limits)"""
+    from . import signer
+    if not cfg.owner:
+        raise Refusal("my_buying_power needs the owner account: start the server with --owner")
+    agent = signer.agent_address(cfg.agent_key_file) if cfg.agent_key_file else None
+    pairs = [_pair(chain, params, required=True)] if params.get("symbol") or params.get("pair_id") else chain.pairs()[:5]
+    out = []
+    for p in pairs:
+        ctx = pretrade.Ctx(chain, cfg.owner, p["pair_id"], agent)
+        cap = pretrade.leverage_cap(ctx)
+        levs = [l for l in (10000, 20000, 30000, 50000, 100000, 200000, 500000) if l <= cap] or ([cap] if cap else [])
+        out.append({"market": p.get("name") or p.get("symbol"), "max_leverage": cap / 10000,
+                    "by_leverage": [{"leverage": l / 10000, "max_long": pretrade.units(pretrade.max_size(ctx, "buy", l), 18),
+                                     "max_short": pretrade.units(pretrade.max_size(ctx, "sell", l), 18)} for l in levs]})
+    return {"summary": "Sizes at the mark, from free margin" + (" and the agent's limits" if agent else "") + ".", "markets": out}
 
 
 def refusal_meanings(chain):
@@ -770,6 +837,22 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"order_id": {"type": "integer"}}, "required": ["order_id"]},
      "annotations": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True},
      "handler": cancel_order, "write": True},
+    # local only (they read the configured owner and agent; a read-only server lists neither)
+    {"name": "check_order", "title": "Check an order",
+     "description": "Check an order against every rule the network runs (market, size, price band, margin, the agent's "
+                    "limits) for the configured owner and agent, without signing or sending anything: whether it would be "
+                    "taken, each rule it breaks with the real numbers, and fixes that pass. Ask: \"Can I buy 0.1 ETH at 20x?\"",
+     "inputSchema": {"type": "object", "properties": {
+         **MARKET, "side": {"type": "string", "enum": ["buy", "sell"]}, "size": {"type": "number"},
+         "order_type": {"type": "string", "enum": ["market", "limit"]}, "price": {"type": "number"},
+         "leverage": {"type": "number", "description": "default: the highest the limits allow"},
+         "reduce_only": {"type": "boolean"}, "post_only": {"type": "boolean"}}, "required": ["side", "size"]},
+     "annotations": {"readOnlyHint": True, "openWorldHint": True}, "handler": check_order, "write": True},
+    {"name": "my_buying_power", "title": "My buying power",
+     "description": "Per market, the largest long and short the configured owner can open at each allowed leverage, from "
+                    "free margin and the agent's limits together. Ask: \"How much ETH can I buy?\"",
+     "inputSchema": {"type": "object", "properties": {**MARKET}},
+     "annotations": {"readOnlyHint": True, "openWorldHint": True}, "handler": my_buying_power, "write": True},
 ]
 
 

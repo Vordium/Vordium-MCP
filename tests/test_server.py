@@ -13,7 +13,7 @@ from vordium_mcp.server import RateLimit, handle, make_chain, make_http_handler,
 
 READS = ["get_network", "get_markets", "get_oracle", "get_orderbook", "get_funding", "get_balance", "get_positions",
          "get_orders", "get_policy", "get_risk"]
-WRITES = ["place_order", "cancel_order"]
+WRITES = ["place_order", "cancel_order", "check_order", "my_buying_power"]
 LISTED = ["get_status", "get_network", "get_markets", "get_fees", "get_oracle", "get_orderbook", "get_candles", "get_trades",
           "get_funding", "get_account", "get_fills", "get_balance", "get_positions", "get_orders", "get_agents",
           "get_policy", "get_risk", "get_tiers", "get_season", "get_points", "get_leaderboard", "get_referrals", "get_tx",
@@ -239,6 +239,12 @@ def stub(monkeypatch):
     import vordium_mcp
     monkeypatch.setitem(sys.modules, "vordium_mcp.signer", s)
     monkeypatch.setattr(vordium_mcp, "signer", s, raising=False)
+    # the pre-trade check reads the network's market rules, which these fakes do not serve: it passes here, and its own
+    # rules are tested in test_pretrade.py (a failing check is tested below)
+    monkeypatch.setattr(tools.pretrade, "Ctx", lambda *a, **k: object())
+    monkeypatch.setattr(tools.pretrade, "snap", lambda ctx, o: o)
+    monkeypatch.setattr(tools.pretrade, "check", lambda ctx, o, fixes=True: {"can_place": True, "failed": [], "fixes": [],
+                                                                               "figures": {}, "not_checked": []})
     return s
 
 
@@ -320,7 +326,6 @@ def test_chain_refusal_is_relayed_not_success(stub):
 
 
 @pytest.mark.parametrize("over,blocker", [
-    ({"/session/valid?owner=%s&session_key=%s" % (OWNER, AGENT): {"valid": False, "confirmed": False}}, "no confirmed session"),
     ({"/agents/%s/%s" % (OWNER, AGENT): {"found": False}}, "agent not registered"),
     ({"/agents/%s/%s" % (OWNER, AGENT): {"found": True, "status": "revoked", "expires_ms": 9_000_000}}, "agent revoked"),
     ({"/agents/%s/%s" % (OWNER, AGENT): {"found": True, "status": "active", "expires_ms": 0}}, "agent expired"),
@@ -332,6 +337,26 @@ def test_each_blocker_refuses_before_signing(stub, over, blocker):
     net, cfg, chain = setup(active=True, **{rest + k: v for k, v in over.items()})
     err, doc = call(chain, trading_cfg(cfg), "place_order", ORDER)
     assert err and blocker in doc["reason"] and stub.sent == []
+
+
+def test_the_test_network_takes_an_agent_with_no_session(stub):
+    """the test network takes an agent's own signature with no session: a missing session is no blocker there"""
+    rest = NETWORKS["testnet"]["rest"]
+    net, cfg, chain = setup(active=True, **{rest + "/session/valid?owner=%s&session_key=%s" % (OWNER, AGENT): {"valid": False, "confirmed": False}})
+    err, doc = call(chain, trading_cfg(cfg), "place_order", ORDER)
+    assert not err and stub.sent
+
+
+def test_an_order_the_network_would_refuse_is_not_signed(stub, monkeypatch):
+    """every network rule first: a failed pre-trade check refuses before signing, with the rule and the fixes"""
+    monkeypatch.setattr(tools.pretrade, "check", lambda ctx, o, fixes=True: {
+        "can_place": False, "failed": [{"rule": "agent", "code": "agent_refused/max_leverage", "words": "The agent may use up to 10× here.",
+                                        "needed": "≤ 10×", "have": "20×"}], "figures": {}, "not_checked": [],
+        "fixes": [{"label": "use 10× (agent limit)", "passes": True, "order": {}}]})
+    net, cfg, chain = setup(active=True)
+    err, doc = call(chain, trading_cfg(cfg), "place_order", ORDER)
+    assert err and "the network would refuse it" in doc["reason"] and "10×" in doc["reason"] and stub.sent == []
+    assert "use 10× (agent limit)" in doc.get("remedy", "")
 
 
 def test_paused_market_refused(stub):
