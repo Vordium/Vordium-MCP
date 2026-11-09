@@ -13,11 +13,13 @@ from vordium_mcp.server import RateLimit, handle, make_chain, make_http_handler,
 
 READS = ["get_network", "get_markets", "get_oracle", "get_orderbook", "get_funding", "get_balance", "get_positions",
          "get_orders", "get_policy", "get_risk"]
-WRITES = ["place_order", "cancel_order", "check_order", "my_buying_power"]
+# the local-only tools (owner reads, then every write) after the reads
+WRITES = ["check_order", "my_buying_power", "place_order", "close_position", "set_tpsl", "modify_order", "cancel_order",
+          "cancel_all", "stop_all"]
 LISTED = ["get_status", "get_network", "get_markets", "get_fees", "get_oracle", "get_orderbook", "get_candles", "get_trades",
           "get_funding", "get_account", "get_fills", "get_balance", "get_positions", "get_orders", "get_agents",
           "get_policy", "get_risk", "get_tiers", "get_season", "get_points", "get_leaderboard", "get_referrals", "get_tx",
-          "get_block", "get_address"]
+          "get_block", "get_address", "get_order"]
 
 
 def call(chain, cfg, name, args=None):
@@ -189,7 +191,9 @@ ORDER = {"symbol": "ETH", "side": "buy", "size": 0.01, "order_type": "limit", "p
 
 
 def trading_cfg(cfg, keyfile="/nonexistent"):
-    return dataclasses.replace(cfg, allow_trading=True, owner=OWNER, agent_key_file=keyfile)
+    # orders="auto": these tests are about the gate and the chain's answer; the user's confirmation is tested in
+    # test_orders_and_keys.py
+    return dataclasses.replace(cfg, allow_trading=True, owner=OWNER, agent_key_file=keyfile, orders="auto")
 
 
 @pytest.mark.parametrize("name,args", [("place_order", ORDER), ("cancel_order", {"order_id": 7})])
@@ -391,19 +395,19 @@ def test_read_only_server_has_no_write_tools():
 
 # ── the agent key file ───────────────────────────────────────────────────────
 def test_key_file_must_be_private_and_is_never_echoed(tmp_path):
-    from vordium_mcp import signer
+    from vordium_mcp import keys
     key = "0x" + "4c" * 32
     p = tmp_path / "agent.key"
     p.write_text(key + "\n")
     os.chmod(p, 0o644)
-    with pytest.raises(signer.SignerUnavailable) as e:
-        signer._read_key(str(p))
+    with pytest.raises(keys.KeyError_) as e:
+        keys._from_file(str(p))
     assert "chmod 600" in str(e.value) and key not in str(e.value)
     os.chmod(p, 0o600)
-    assert signer._read_key(str(p)) == key
+    assert keys._from_file(str(p)) == key
     p.write_text("not a key")
-    with pytest.raises(signer.SignerUnavailable) as e:
-        signer._read_key(str(p))
+    with pytest.raises(keys.KeyError_) as e:
+        keys._from_file(str(p))
     assert "not a key" not in str(e.value)
 
 
@@ -416,7 +420,8 @@ def test_agent_address_from_key_file(tmp_path):
     p = tmp_path / "agent.key"
     p.write_text(key)
     os.chmod(p, 0o600)
-    assert signer.agent_address(str(p)) == Account.from_key(key).address
+    from vordium_mcp.config import Config
+    assert signer.agent_address(Config(owner="0x" + "aa" * 20, agent_key_file=str(p))) == Account.from_key(key).address
 
 
 # ── read-only HTTP ───────────────────────────────────────────────────────────
@@ -506,3 +511,67 @@ def test_policy_list_reads_each_agents_own_record():
     rec = out["agents"][0]["record"]
     assert rec["policy_v1"]["daily_loss_limit_6dec"] == 20000000 and rec["market_limits"][0]["pair"] == 1
     assert "policy_v1" in out["agents"][0]["policy_fields_present"]
+
+
+def test_the_main_network_refuses_an_agent_with_no_confirmed_session(stub):
+    """the test network needs no agent session; the main network still does, and nothing is signed without one"""
+    rest = NETWORKS["mainnet"]["rest"]
+    net, cfg, chain = setup("mainnet", active=True, **{rest + "/session/valid?owner=%s&session_key=%s" % (OWNER, AGENT): {"valid": False, "confirmed": False}})
+    err, doc = call(chain, trading_cfg(cfg), "place_order", ORDER)
+    assert err and "no confirmed session" in doc["reason"] and stub.sent == []
+
+
+def test_account_liquidation_distance_is_signed_and_cross_positions_read_unknown(stub):
+    """a long whose mark is past its liquidation price reads at/past (≤ 0), never a positive "% away"; a cross
+    position's liquidation price is the account's, unknown ("—") until the network publishes it"""
+    rest = NETWORKS["testnet"]["rest"]
+    pos = [{"id": 11, "pair_id": 1, "size": str(10 ** 17), "is_long": True, "entry_price": 2600_000000, "margin": 50_000000,
+            "liquidation_price": 2550_000000, "unrealized_pnl": 0},
+           {"id": 12, "pair_id": 2, "size": str(10 ** 15), "is_long": False, "entry_price": 82000_000000, "margin": 10_000000,
+            "liquidation_price": 90000_000000, "unrealized_pnl": 0}]
+    net, cfg, chain = setup("testnet", **{rest + f"/positions/{OWNER}": pos,
+                                          rest + f"/account/cross/{OWNER}": {"active": True, "default_mode": "isolated",
+                                              "modes": [{"pair_id": 2, "mode": "cross"}], "cross_positions": [
+                                              {"position_id": 12, "pair_id": 2, "liquidation_price_estimate_8dec": None}]}})
+    err, doc = call(chain, cfg, "get_account", {"address": OWNER})
+    assert not err
+    eth, btc = doc["positions"]
+    assert eth["margin_mode"] == "isolated" and eth["distance_to_liquidation_pct"] < 0      # mark 2500.6 is below 2550
+    assert "at or past its liquidation price" in doc["summary"]
+    assert btc["margin_mode"] == "cross" and btc["liquidation_price"] is None and btc["distance_to_liquidation_pct"] is None
+
+
+def test_account_mode_unknown_when_the_cross_read_fails_and_isolated_only_where_the_network_has_no_cross(stub):
+    """404 = the network has no cross margin (isolated); any other failure = mode unknown: no liquidation price
+    (never the per-position one, which is wrong for a cross position)"""
+    rest = NETWORKS["testnet"]["rest"]
+    pos = [{"id": 11, "pair_id": 1, "size": str(10 ** 17), "is_long": True, "entry_price": 2600_000000, "margin": 50_000000,
+            "liquidation_price": 2400_000000, "unrealized_pnl": 0}]
+    net, cfg, chain = setup("testnet", **{rest + f"/positions/{OWNER}": pos, rest + f"/account/cross/{OWNER}": (500, "{}")})
+    err, doc = call(chain, cfg, "get_account", {"address": OWNER})
+    assert not err and doc["positions"][0]["margin_mode"] == "unknown" and doc["positions"][0]["liquidation_price"] is None
+    net, cfg, chain = setup("testnet", **{rest + f"/positions/{OWNER}": pos})          # no cross route: 404
+    err, doc = call(chain, cfg, "get_account", {"address": OWNER})
+    assert not err and doc["positions"][0]["margin_mode"] == "isolated" and doc["positions"][0]["liquidation_price"] == 2400.0
+    net, cfg, chain = setup("testnet", **{rest + f"/positions/{OWNER}": pos, rest + f"/account/cross/{OWNER}": {
+        "default_mode": "cross", "modes": [], "cross_positions": []}})
+    err, doc = call(chain, cfg, "get_account", {"address": OWNER})
+    assert not err and doc["positions"][0]["margin_mode"] == "cross" and doc["positions"][0]["liquidation_price"] is None
+
+
+def test_a_cross_position_reads_the_accounts_published_liquidation_price(stub):
+    """once the network publishes the account's cross estimate (8 decimals), a cross position shows THAT price and
+    its signed distance — never the per-position one"""
+    rest = NETWORKS["testnet"]["rest"]
+    pos = [{"id": 12, "pair_id": 2, "size": str(10 ** 15), "is_long": False, "entry_price": 82000_000000, "margin": 10_000000,
+            "liquidation_price": 90000_000000, "unrealized_pnl": 0}]
+    net, cfg, chain = setup("testnet", **{rest + f"/positions/{OWNER}": pos, rest + f"/account/cross/{OWNER}": {
+        "active": True, "default_mode": "cross", "modes": [], "cross_positions": [
+            {"position_id": 12, "pair_id": 2, "liquidation_price_estimate_8dec": 12300508548509}]}})
+    err, doc = call(chain, cfg, "get_account", {"address": OWNER})
+    assert not err
+    btc = doc["positions"][0]
+    assert btc["margin_mode"] == "cross" and btc["liquidation_price"] == 123005.08548509
+    mark = btc["mark_price"]
+    assert btc["distance_to_liquidation_pct"] == round((123005.08548509 - mark) / mark * 100, 2)
+

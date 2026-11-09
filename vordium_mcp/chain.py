@@ -180,6 +180,28 @@ class Chain:
     def positions(self, address):
         return self.read(f"/positions/{address}", cache=False)
 
+    def cross(self, address):
+        """the account's cross-margin record (cross positions and their account-level liquidation price), where served"""
+        return self.read(f"/account/cross/{address}", cache=False)
+
+    def margin_modes(self, address):
+        """each pair's margin mode for this account. Returns ('none', None) where the network has no cross margin
+        (its read answers 404: every position is isolated); ('unknown', None) when the read fails any other way (a cross
+        position's liquidation price must then read unknown, never the per-position one); else ('ok', state) with
+        state = {'default': 'cross'|'isolated', 'modes': {pair_id: mode}, 'cross': {position_id: record}}."""
+        try:
+            r = self.cross(address)
+        except Exception:  # noqa: BLE001
+            return "unknown", None
+        if r.get("status") == 404:
+            return "none", None
+        j = r.get("json") if r.ok else None
+        if not isinstance(j, dict) or j.get("default_mode") not in ("cross", "isolated"):
+            return "unknown", None
+        modes = {m.get("pair_id"): m.get("mode") for m in (j.get("modes") or []) if isinstance(m, dict)}
+        return "ok", {"default": j["default_mode"], "modes": modes,
+                      "cross": {c.get("position_id"): c for c in (j.get("cross_positions") or []) if isinstance(c, dict)}}
+
     def orders(self, address):
         return self.read(f"/orders/{address}", cache=False)
 

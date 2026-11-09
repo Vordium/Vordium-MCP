@@ -52,6 +52,16 @@ class Unreadable(RuntimeError):
     """a read the check needs did not answer: the check says so instead of judging"""
 
 
+def liq_mode_of(mstate, ms, pair_id):
+    """the account's margin mode for one market, from chain.margin_modes: "none" (the network has no cross
+    margin) = isolated; a failed read = unknown; else this market's own mode, or the account default."""
+    if mstate == "none":
+        return "isolated"
+    if mstate != "ok" or not isinstance(ms, dict):
+        return "unknown"
+    return (ms.get("modes") or {}).get(int(pair_id), ms.get("default")) or "unknown"
+
+
 class Ctx:
     """Everything the chain's placement check reads, for one owner and one market, read once."""
 
@@ -80,6 +90,9 @@ class Ctx:
         book = need(chain.orderbook(self.pair_id), "order book")
         top = lambda k: _int(((book.get(k) or [[None]])[0] or [None])[0])
         self.best_bid8, self.best_ask8 = top("bids_8dec"), top("asks_8dec")   # an empty side stays None (nothing to cross)
+        # THIS pair's margin mode for the account. Cross has ONE account-level liquidation price, so the isolated
+        # formula below would be wrong for it; a failed read leaves the mode unknown. Either way the figure reads "—".
+        self.liq_mode = liq_mode_of(*chain.margin_modes(owner), self.pair_id)
         eq = need(chain.equity(owner), "account balance")
         self.free6 = _int(eq.get("free_balance"))
         if self.free6 is None:
@@ -249,7 +262,10 @@ def check(ctx, order, fixes=True):
     out = {"can_place": not fails, "failed": fails, "not_checked": unchecked, "figures": figures}
     out["fixes"] = _fixes(ctx, order, fails) if fails and fixes else []
     if not fails and figures.get("liq_distance_pct") is not None and figures["liq_distance_pct"] < 3:
-        out["warning"] = f"After this fill the liquidation price would be {figures['liq_price']}, {figures['liq_distance_pct']:.1f}% from the mark."
+        out["warning"] = (f"After this fill the mark would already be at or past the liquidation price {figures['liq_price']}."
+                          if figures["liq_distance_pct"] <= 0 else
+                          f"After this fill the liquidation price would be {figures['liq_price']}: the mark can move only "
+                          f"{figures['liq_distance_pct']:.1f}% against you first.")
     return out
 
 
@@ -332,7 +348,7 @@ def _agent_rules(ctx, order, F, unchecked, size, after, market, notional6, lev, 
 def _liq_after(ctx, after, buy, size, res8, margin6, ro):
     """The liquidation price after a full fill (the isolated formula the network shows on positions) and its distance."""
     mm = (ctx.g("maintenance_margin_bps") or 0) / 10000
-    if not after or not res8 or not ctx.mark8 or ro:
+    if not after or not res8 or not ctx.mark8 or ro or getattr(ctx, 'liq_mode', 'isolated') != 'isolated':
         return {"liq_price": "—", "liq_distance_pct": None}
     add = size if (after > 0) == buy else 0
     old = abs(ctx.pos18) if (after > 0) == (ctx.pos18 > 0) else 0
@@ -343,7 +359,8 @@ def _liq_after(ctx, after, buy, size, res8, margin6, ro):
     mark = ctx.mark8 / E8
     if p <= 0:
         return {"liq_price": "None", "liq_distance_pct": None}
-    return {"liq_price": f"{p:,.6g}", "liq_distance_pct": round(abs(mark - p) / mark * 100, 2)}
+    # signed like get_account: how far the mark can move against the position first (0 or less: at or past it)
+    return {"liq_price": f"{p:,.6g}", "liq_distance_pct": round(((mark - p) if after > 0 else (p - mark)) / mark * 100, 2)}
 
 
 def max_size(ctx, side, lev_bps, price8=0, agent=True):

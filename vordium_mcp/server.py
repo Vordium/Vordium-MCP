@@ -11,6 +11,7 @@ from . import __version__
 from .chain import Chain
 from .networks import NETWORKS
 from .prompts import PromptError, get_prompt, list_prompts, list_resources, read_resource
+from . import tools as _tools
 from .tools import Refusal, call, listed_tools
 
 NAME = "vordium-mcp"
@@ -26,9 +27,10 @@ def instructions(cfg):
         lines.append("This server is read-only: it has no trading tools. To trade as a policy-limited agent, run "
                      "vordium-mcp on your own machine (uvx vordium-mcp).")
     else:
-        lines.append("place_order and cancel_order sign on the user's machine with a registered agent key and are refused "
-                     "while the network reports agent trading off; the chain enforces the agent's limits. Call "
-                     "get_network first to see the current state.")
+        lines.append("place_order, close_position, modify_order, set_tpsl, cancel_order, cancel_all and stop_all sign on "
+                     "the user's machine with a registered agent key and are refused while the network reports agent "
+                     "trading off; the chain enforces the agent's limits. Every order is shown to the user to confirm "
+                     "before it is signed, unless the user chose auto. Call get_network first to see the current state.")
     lines.append("Never ask the user for a private key or recovery phrase: no tool takes one.")
     return " ".join(lines)
 
@@ -121,17 +123,71 @@ class Stats:
                     "rate_limited": self.rate_limited, "errors": self.errors}
 
 
-def handle(message, chain, cfg, stats=None):
+class Session:
+    """One client connection over stdio: what the client said it can do (at initialize), and a way to ask the user a
+    question in the middle of a tool call (MCP elicitation) — the server's own request, written out and answered before
+    the call goes on. Messages that arrive while it waits are kept and handled afterwards, in order."""
+
+    def __init__(self, write=None, read=None, wait_s=600.0):
+        self.capabilities = {}
+        self._write, self._read, self._n, self.queued, self.wait_s = write, read, 0, [], wait_s
+
+    current = None                                         # the id of the tools/call being run (its cancel aborts a question)
+
+    def can_elicit(self):
+        """A client that declared elicitation in form mode ({} or with "form"): a URL-only client cannot show the order."""
+        e = self.capabilities.get("elicitation")
+        return (self._write is not None and self._read is not None and isinstance(e, dict)
+                and (not e or isinstance(e.get("form"), dict)))
+
+    def elicit(self, message, schema):
+        self._n += 1
+        rid = f"vordium-elicit-{self._n}"
+        self._write({"jsonrpc": "2.0", "id": rid, "method": "elicitation/create",
+                     "params": {"message": message, "requestedSchema": schema}})
+        end = time.monotonic() + self.wait_s
+        while time.monotonic() < end:
+            m = self._read(max(0.0, end - time.monotonic()))
+            if m is None:                                   # the client went away, or no answer in time
+                return {"action": "cancel"}
+            if isinstance(m, dict) and m.get("id") == rid and "method" not in m:
+                return m.get("result") if isinstance(m.get("result"), dict) else {"action": "decline"}
+            if (isinstance(m, dict) and m.get("method") == "notifications/cancelled" and self.current is not None
+                    and (m.get("params") or {}).get("requestId") == self.current):
+                return {"action": "cancel"}                # the client gave up on this call: never sign behind its back
+            self.queued.append(m)
+        return {"action": "cancel"}
+
+
+CHEAP = ("initialize", "ping", "tools/list", "prompts/list", "resources/list", "resources/templates/list")
+
+
+def _complete(payload, cfg, name):
+    """Every successful result carries summary and network (outputSchema requires both)."""
+    if isinstance(payload, dict):
+        if "network" not in payload:
+            payload = {**payload, "network": cfg.network}
+        if not payload.get("summary"):
+            t = next((t for t in listed_tools(cfg) if t["name"] == name), {})
+            payload = {**payload, "summary": f"{t.get('title', name)}: read from the {payload['network']}."}
+    return payload
+
+
+def handle(message, chain, cfg, stats=None, session=None):
     """One JSON-RPC message in, one response out (or None for a notification)."""
     if not isinstance(message, dict):
         return _error(None, -32600, "invalid request")
     method, id_ = message.get("method"), message.get("id")
+    if method is None and ("result" in message or "error" in message):
+        return None                                        # a client's answer to a question that is no longer open
     params = message.get("params") or {}
     if not isinstance(params, dict):
         return _error(id_, -32602, "params must be an object")
     if stats:
         stats.method(method)
     if method == "initialize":
+        if session is not None and isinstance(params.get("capabilities"), dict):
+            session.capabilities = params["capabilities"]
         asked = params.get("protocolVersion")
         return _result(id_, {
             "protocolVersion": asked if asked in SUPPORTED_PROTOCOLS else SUPPORTED_PROTOCOLS[0],
@@ -145,29 +201,39 @@ def handle(message, chain, cfg, stats=None):
     if method == "ping":
         return _result(id_, {})
     if method == "tools/list":
-        return _result(id_, {"tools": [{k: v for k, v in t.items() if k in ("name", "title", "description", "inputSchema", "annotations")}
+        return _result(id_, {"tools": [{k: v for k, v in t.items() if k in ("name", "title", "description", "inputSchema", "outputSchema", "annotations")}
                                        for t in listed_tools(cfg)]})
     if method == "tools/call":
         name = params.get("name")
         args = params.get("arguments") or {}
         known = any(t["name"] == name for t in listed_tools(cfg))
         if not isinstance(args, dict):
-            return _result(id_, _content({"refused": True, "reason": "arguments must be an object"}, True))
+            return _result(id_, _content({"refused": True, "reason": "arguments must be an object", "network": cfg.network}, True))
+        _tools.CTX.session = session
+        if session is not None:
+            session.current = id_
         try:
-            out = _result(id_, _content(call(chain, cfg, name, args)))
+            out = _result(id_, _content(_complete(call(chain, cfg, name, args), cfg, name)))
             if stats:
                 stats.tool(name if known else "unknown", False)
             return out
         except Refusal as r:
             if stats:
                 stats.tool(name if known else "unknown", True)
-            return _result(id_, _content(r.payload, is_error=True))
+            return _result(id_, _content({**r.payload, "network": cfg.network}, is_error=True))
         except Exception as e:                                    # never a fabricated success
             if stats:
                 stats.tool(name if known else "unknown", True)
                 stats.bump("errors")
-            return _result(id_, _content({"refused": True, "reason": f"{type(e).__name__}: {str(e)[:300]}",
-                                          "note": "Nothing was signed or sent."}, is_error=True))
+            signs = any(t["name"] == name and t.get("annotations", {}).get("destructiveHint") for t in listed_tools(cfg))
+            return _result(id_, _content({"refused": True, "reason": f"{type(e).__name__}: {str(e)[:300]}", "network": cfg.network,
+                                          "note": ("This failed while signing or sending: read get_orders and get_positions "
+                                                   "before trying again." if signs else "Nothing was signed or sent.")},
+                                         is_error=True))
+        finally:
+            _tools.CTX.session = None
+            if session is not None:
+                session.current = None
     if method == "prompts/list":
         return _result(id_, {"prompts": list_prompts()})
     if method == "prompts/get":
@@ -197,24 +263,56 @@ def make_chain(cfg, fetch=None):
 def serve_stdio(cfg, stdin=None, stdout=None, chain=None):
     stdin, stdout = stdin or sys.stdin, stdout or sys.stdout
     chain = chain or make_chain(cfg)
-    for line in stdin:
-        line = line.strip()
-        if not line:
-            continue
+
+    def write(obj):
+        stdout.write(json.dumps(obj, default=str) + "\n")
+        stdout.flush()
+
+    import queue
+    lines, closed = queue.Queue(), threading.Event()
+
+    def reader():                                  # every line the client sends, in order, as soon as it arrives
         try:
-            message = json.loads(line)
+            for line in stdin:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    lines.put(json.loads(line))
+                except Exception:
+                    lines.put("!parse")
         except Exception:
-            stdout.write(json.dumps(_error(None, -32700, "parse error")) + "\n")
-            stdout.flush()
+            pass                                   # an unreadable stdin ends the session like a closed one
+        finally:
+            closed.set()
+            lines.put(None)
+
+    threading.Thread(target=reader, daemon=True).start()
+
+    def next_line(wait_s=None):
+        """One message from the client: a parsed dict, "!parse" for a bad line, or None at the end (or no answer in time)."""
+        if closed.is_set() and lines.empty():
+            return None                            # the client went away (even if a question consumed the end marker)
+        try:
+            return lines.get(timeout=wait_s)
+        except queue.Empty:
+            return None
+
+    session = Session(write=write, read=lambda wait: next_line(wait))
+    while True:
+        message = session.queued.pop(0) if session.queued else next_line()
+        if message is None:
+            break
+        if message == "!parse":
+            write(_error(None, -32700, "parse error"))
             continue
         try:
-            response = handle(message, chain, cfg)
+            response = handle(message, chain, cfg, session=session)
         except Exception:
             print(traceback.format_exc()[:800], file=sys.stderr)
             response = _error(message.get("id") if isinstance(message, dict) else None, -32603, "internal error")
         if response is not None:
-            stdout.write(json.dumps(response, default=str) + "\n")
-            stdout.flush()
+            write(response)
 
 
 # ── read-only streamable HTTP ────────────────────────────────────────────────
@@ -376,8 +474,11 @@ def make_http_handler(cfg, chain, limiter, stats=None, address_limiter=None, res
             sid = (self.headers.get("Mcp-Session-Id") or "").strip().lower()
             sid = sid if cfg.hosted and SESSION.match(sid) else None     # connections are told apart on a public server only
             opening = isinstance(message, dict) and message.get("method") == "initialize"
+            # listing what the server offers costs nothing per connection (only the address's budget below)
+            cheap = isinstance(message, dict) and (message.get("method") in CHEAP
+                                                   or str(message.get("method", "")).startswith("notifications/"))
             ok, wait, per, n, cap = True, 0, None, 0, 0
-            if sid or not opening:                       # its own budget first: a refused request costs its address nothing
+            if (sid or not opening) and not cheap:                       # its own budget first: a refused request costs its address nothing
                 ok, wait = limiter.take(("s:" + sid) if sid else ("a:" + client))
                 per, n, cap = ("connection" if sid else "address"), limiter.per_minute, int(limiter.cap)
             if ok:                                       # then the address's budget across its connections

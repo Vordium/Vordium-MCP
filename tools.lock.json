@@ -1,0 +1,2571 @@
+{
+ "package": "vordium-mcp",
+ "version": "0.6.0",
+ "tools": [
+  {
+   "name": "get_status",
+   "title": "Network status",
+   "description": "Is the network live: block height, blocks per second, validators agreeing, and whether trading and deposits are open. Ask: \"Is Vordium up right now?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {}
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "live": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "height": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "finalized_height": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "blocks_per_second": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "trading_open": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "deposits_open": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "agent_trading_on": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "trading_blockers": {
+      "type": "array"
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Network status"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_network",
+   "title": "Network identity",
+   "description": "Which Vordium network this server reads, checked against the network itself, and the facts it vouches for (chain id, genesis, finalized block, agent trading on or off). Ask: \"Which network am I connected to?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {}
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "identity": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "truth": {
+      "type": [
+       "object",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Network identity"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_markets",
+   "title": "Markets",
+   "description": "Every market the network lists, with its state, leverage, fees and trading rules (tick, lot, minimum size). Ask: \"Which markets can I trade?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {}
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "count": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "markets": {
+      "type": "array"
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Markets"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_fees",
+   "title": "Fees and margins",
+   "description": "Maker and taker fees, maximum leverage, initial and maintenance margin, and the liquidation terms as the network publishes them (the fee, or none), for every market or one. Ask: \"What does it cost to trade BTC with 10x?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "symbol": {
+      "type": "string",
+      "description": "market symbol as get_markets lists it, e.g. BTC, ETH or ETHUSDT"
+     },
+     "pair_id": {
+      "type": "integer",
+      "description": "or the market's pair id, e.g. 1"
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "count": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "markets": {
+      "type": "array"
+     },
+     "liquidation": {
+      "type": [
+       "object",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Fees and margins"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_oracle",
+   "title": "Prices",
+   "description": "Oracle and mark prices, for every market or one. Ask: \"What is the ETH price?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "symbol": {
+      "type": "string",
+      "description": "market symbol as get_markets lists it, e.g. BTC, ETH or ETHUSDT"
+     },
+     "pair_id": {
+      "type": "integer",
+      "description": "or the market's pair id, e.g. 1"
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "prices": {
+      "type": "array"
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Prices"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_orderbook",
+   "title": "Order book",
+   "description": "Resting bids and asks for one market, best first, with the spread. Ask: \"How deep is the BTC book?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "symbol": {
+      "type": "string",
+      "description": "market symbol as get_markets lists it, e.g. BTC, ETH or ETHUSDT"
+     },
+     "pair_id": {
+      "type": "integer",
+      "description": "or the market's pair id, e.g. 1"
+     },
+     "depth": {
+      "type": "integer",
+      "description": "levels per side, 1-100 (default 20)",
+      "minimum": 1,
+      "maximum": 100
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "market": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "pair_id": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "bids": {
+      "type": "array"
+     },
+     "asks": {
+      "type": "array"
+     },
+     "best_bid": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "best_ask": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "spread": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "empty": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Order book"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_candles",
+   "title": "Candles",
+   "description": "Price candles (open, high, low, close, volume) for one market. Ask: \"How did ETH move over the last day?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "symbol": {
+      "type": "string",
+      "description": "market symbol as get_markets lists it, e.g. BTC, ETH or ETHUSDT"
+     },
+     "pair_id": {
+      "type": "integer",
+      "description": "or the market's pair id, e.g. 1"
+     },
+     "resolution": {
+      "type": "string",
+      "enum": [
+       "1m",
+       "3m",
+       "5m",
+       "15m",
+       "30m",
+       "1h",
+       "2h",
+       "4h",
+       "8h",
+       "12h",
+       "1D",
+       "3D",
+       "1W",
+       "1M"
+      ],
+      "description": "candle length (default 1h)"
+     },
+     "price": {
+      "type": "string",
+      "enum": [
+       "mark",
+       "last"
+      ],
+      "description": "mark price (default) or last traded price"
+     },
+     "limit": {
+      "type": "integer",
+      "description": "number of candles, 1-500 (default 24)",
+      "minimum": 1,
+      "maximum": 500
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "market": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "pair_id": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "resolution": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "count": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "candles": {
+      "type": "array"
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Candles"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_trades",
+   "title": "Recent trades",
+   "description": "The latest trades in one market: time, side, price, size and value. Ask: \"Show the last 10 BTC trades.\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "symbol": {
+      "type": "string",
+      "description": "market symbol as get_markets lists it, e.g. BTC, ETH or ETHUSDT"
+     },
+     "pair_id": {
+      "type": "integer",
+      "description": "or the market's pair id, e.g. 1"
+     },
+     "limit": {
+      "type": "integer",
+      "description": "1-100 (default 20)",
+      "minimum": 1,
+      "maximum": 100
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "market": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "pair_id": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "count": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "trades": {
+      "type": "array"
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Recent trades"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_funding",
+   "title": "Funding",
+   "description": "The funding rate, interval and next settlement for one market, and optionally its past settlements. Ask: \"What has ETH funding been over the last day?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "symbol": {
+      "type": "string",
+      "description": "market symbol as get_markets lists it, e.g. BTC, ETH or ETHUSDT"
+     },
+     "pair_id": {
+      "type": "integer",
+      "description": "or the market's pair id, e.g. 1"
+     },
+     "history": {
+      "type": "integer",
+      "description": "also return this many past settlements, 1-400",
+      "minimum": 1,
+      "maximum": 400
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "market": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "pair_id": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "rate_per_interval_pct": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "interval_secs": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "next_funding": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "history": {
+      "type": "array"
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Funding"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_account",
+   "title": "Account",
+   "description": "One account at a glance: USDC balances, positions with entry, mark, unrealized PnL and liquidation price, and open orders. Ask: \"Check my account 0x\u2026\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "address": {
+      "type": "string",
+      "description": "0x-prefixed 20-byte account address (0x followed by 40 hex characters)",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+     }
+    },
+    "required": [
+     "address"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "address": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "usdc": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "positions": {
+      "type": "array"
+     },
+     "orders": {
+      "type": "array"
+     },
+     "explorer": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Account"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_fills",
+   "title": "Trade history",
+   "description": "An account's recent trades with price, size, fee and realized PnL, as the explorer records them. Ask: \"What did 0x\u2026 trade today?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "address": {
+      "type": "string",
+      "description": "0x-prefixed 20-byte account address (0x followed by 40 hex characters)",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+     },
+     "limit": {
+      "type": "integer",
+      "description": "1-50 (default 20)",
+      "minimum": 1,
+      "maximum": 50
+     }
+    },
+    "required": [
+     "address"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "address": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Trade history"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_balance",
+   "title": "Balance",
+   "description": "An account's USDC: available to trade, in positions, reserved by orders, unrealized PnL. Ask: \"How much USDC does 0x\u2026 have?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "address": {
+      "type": "string",
+      "description": "0x-prefixed 20-byte account address (0x followed by 40 hex characters)",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+     }
+    },
+    "required": [
+     "address"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "address": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "usdc": {
+      "type": [
+       "object",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Balance"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_positions",
+   "title": "Positions",
+   "description": "An account's open positions as the chain stores them. Ask: \"What positions does 0x\u2026 hold?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "address": {
+      "type": "string",
+      "description": "0x-prefixed 20-byte account address (0x followed by 40 hex characters)",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+     }
+    },
+    "required": [
+     "address"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "address": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "count": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "positions": {
+      "type": "array"
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Positions"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_orders",
+   "title": "Open orders",
+   "description": "An account's resting orders, with their order ids. Ask: \"Which orders does 0x\u2026 have open?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "address": {
+      "type": "string",
+      "description": "0x-prefixed 20-byte account address (0x followed by 40 hex characters)",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+     }
+    },
+    "required": [
+     "address"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "address": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "count": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "orders": {
+      "type": "array"
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Open orders"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_agents",
+   "title": "Agents",
+   "description": "An owner's AI agents: status, limits and policy, usage, and each agent's latest actions. Ask: \"What are my agents doing?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "address": {
+      "type": "string",
+      "description": "the owner account",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+     }
+    },
+    "required": [
+     "address"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "owner": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "count": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "agents": {
+      "type": "array"
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Agents"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_policy",
+   "title": "Agent policy",
+   "description": "Each agent's policy and market limits as the chain stores them, and whether the network enforces them now. Ask: \"What limits does my agent trade under?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "address": {
+      "type": "string",
+      "description": "the owner account",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+     },
+     "agent": {
+      "type": "string",
+      "description": "optional agent address"
+     }
+    },
+    "required": [
+     "address"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "owner": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "count": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "agents": {
+      "type": "array"
+     },
+     "available": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Agent policy"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_risk",
+   "title": "Agent usage",
+   "description": "Each agent's usage against its policy, as the chain accounts it. Ask: \"How much of its daily loss limit has my agent used?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "address": {
+      "type": "string",
+      "description": "the owner account",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+     },
+     "agent": {
+      "type": "string",
+      "description": "optional agent address"
+     }
+    },
+    "required": [
+     "address"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "owner": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "count": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "agents": {
+      "type": "array"
+     },
+     "available": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Agent usage"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_tiers",
+   "title": "Tiers",
+   "description": "Agent limits by tier and the referral tier table, where the network serves them. Ask: \"How many agents can each tier run?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {}
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "agent_limits": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "referral_tiers": {
+      "type": [
+       "object",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Tiers"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_season",
+   "title": "Rewards season",
+   "description": "The current rewards season: status, VORD budget, rules, participants and how many qualify. Ask: \"What is the current season?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "season_id": {
+      "type": "integer",
+      "description": "a season number (default: the current season)"
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "season_id": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Rewards season"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_points",
+   "title": "Points",
+   "description": "An address's season points by source, its rank, whether it qualifies and its VORD estimate. Ask: \"What's my rank in the season?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "address": {
+      "type": "string",
+      "description": "0x-prefixed 20-byte account address (0x followed by 40 hex characters)",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+     },
+     "season_id": {
+      "type": "integer",
+      "description": "a season number (default: the current season)"
+     }
+    },
+    "required": [
+     "address"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "address": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "season_id": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "rank": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "qualified": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Points"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_leaderboard",
+   "title": "Leaderboard",
+   "description": "The season's points leaderboard, or the trading leaderboard by PnL, ROI or volume. Ask: \"Who leads the season?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "board": {
+      "type": "string",
+      "enum": [
+       "points",
+       "trading"
+      ],
+      "description": "points (default) or trading"
+     },
+     "limit": {
+      "type": "integer",
+      "description": "1-100 (default 10)",
+      "minimum": 1,
+      "maximum": 100
+     },
+     "window": {
+      "type": "string",
+      "enum": [
+       "24h",
+       "7d",
+       "30d",
+       "all"
+      ],
+      "description": "trading board only (default 7d)"
+     },
+     "sort": {
+      "type": "string",
+      "enum": [
+       "pnl",
+       "roi",
+       "volume"
+      ],
+      "description": "trading board only (default pnl)"
+     },
+     "season_id": {
+      "type": "integer",
+      "description": "a season number (default: the current season)"
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "board": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "rows": {
+      "type": "array"
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Leaderboard"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_referrals",
+   "title": "Referrals",
+   "description": "An address's referral code, tier, referred volume and earnings. Ask: \"How much have my referrals earned?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "address": {
+      "type": "string",
+      "description": "0x-prefixed 20-byte account address (0x followed by 40 hex characters)",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+     }
+    },
+    "required": [
+     "address"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "address": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "code": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "tier": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Referrals"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_tx",
+   "title": "Transaction",
+   "description": "One EVM transaction by hash: block, sender, receiver, value and result, with its explorer link. The hash is sent to the explorer to look it up, so give only a transaction hash, never a key. Ask: \"Explain transaction 0x\u2026\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "hash": {
+      "type": "string",
+      "description": "0x-prefixed 32-byte transaction hash",
+      "pattern": "^0x[0-9a-fA-F]{64}$"
+     }
+    },
+    "required": [
+     "hash"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Transaction"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_block",
+   "title": "Block",
+   "description": "One block by height: time, proposer, operations, with its explorer link. Ask: \"What happened in block 152,000,000?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "height": {
+      "type": "integer",
+      "description": "block number",
+      "minimum": 0
+     }
+    },
+    "required": [
+     "height"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Block"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_address",
+   "title": "Address",
+   "description": "An address summary: account value, open positions, agents and EVM transactions, with its explorer link. Ask: \"Look up 0x\u2026\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "address": {
+      "type": "string",
+      "description": "0x-prefixed 20-byte account address (0x followed by 40 hex characters)",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+     }
+    },
+    "required": [
+     "address"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "address": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "account_value_usdc": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "open_positions": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "explorer": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Address"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "get_order",
+   "title": "One order",
+   "description": "One resting order by its id: market, side, price, size left. An order that is not resting now (it filled or was cancelled) is reported as gone. Ask: \"What is the state of order 8840974?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "order_id": {
+      "type": "integer",
+      "description": "the chain's order id, as get_orders lists it"
+     },
+     "address": {
+      "type": "string",
+      "description": "the account (default: the server's configured owner)",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+     }
+    },
+    "required": [
+     "order_id"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "address": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "order_id": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "found": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "order": {
+      "type": [
+       "object",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "One order"
+   },
+   "where": "everywhere"
+  },
+  {
+   "name": "check_order",
+   "title": "Check an order",
+   "description": "Check an order against every rule the network runs (market, size, price band, margin, the agent's limits) for the configured owner and agent, without signing or sending anything: whether it would be taken, each rule it breaks with the real numbers, and fixes that pass. Ask: \"Can I buy 0.1 ETH at 20x?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "symbol": {
+      "type": "string",
+      "description": "market symbol as get_markets lists it, e.g. BTC, ETH or ETHUSDT"
+     },
+     "pair_id": {
+      "type": "integer",
+      "description": "or the market's pair id, e.g. 1"
+     },
+     "side": {
+      "type": "string",
+      "enum": [
+       "buy",
+       "sell"
+      ],
+      "description": "buy opens or adds to a long, sell to a short"
+     },
+     "size": {
+      "type": "number",
+      "description": "in the market's base asset, e.g. 0.01 for 0.01 ETH"
+     },
+     "order_type": {
+      "type": "string",
+      "enum": [
+       "market",
+       "limit"
+      ],
+      "description": "limit (default) rests at its price; market fills now"
+     },
+     "price": {
+      "type": "number",
+      "description": "limit price in USD (limit orders only)"
+     },
+     "leverage": {
+      "type": "number",
+      "description": "default: the highest the limits allow"
+     },
+     "reduce_only": {
+      "type": "boolean",
+      "description": "only reduce an open position, never open or add"
+     },
+     "post_only": {
+      "type": "boolean",
+      "description": "rest on the book or be refused; never take liquidity"
+     }
+    },
+    "required": [
+     "side",
+     "size"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "can_place": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "failed": {
+      "type": "array"
+     },
+     "fixes": {
+      "type": "array"
+     },
+     "figures": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "not_checked": {
+      "type": "array"
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Check an order"
+   },
+   "where": "local"
+  },
+  {
+   "name": "my_buying_power",
+   "title": "My buying power",
+   "description": "Per market, the largest long and short the configured owner can open at each allowed leverage, from free margin and the agent's limits together. Ask: \"How much ETH can I buy?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "symbol": {
+      "type": "string",
+      "description": "market symbol as get_markets lists it, e.g. BTC, ETH or ETHUSDT"
+     },
+     "pair_id": {
+      "type": "integer",
+      "description": "or the market's pair id, e.g. 1"
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "markets": {
+      "type": "array"
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "My buying power"
+   },
+   "where": "local"
+  },
+  {
+   "name": "place_order",
+   "title": "Place order",
+   "description": "Place a market or limit order as the configured agent, after checking it against every network rule (an order the network would refuse is not signed). Signed on this machine with the agent key (OS keychain or key file); the chain enforces the agent's policy and limits. Refused before anything is signed while the network reports agent trading off, or after stop_all. Every order is first confirmed by you in your AI app, unless you started the server with --orders auto.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "symbol": {
+      "type": "string",
+      "description": "market symbol as get_markets lists it, e.g. BTC, ETH or ETHUSDT"
+     },
+     "pair_id": {
+      "type": "integer",
+      "description": "or the market's pair id, e.g. 1"
+     },
+     "side": {
+      "type": "string",
+      "enum": [
+       "buy",
+       "sell"
+      ],
+      "description": "buy opens or adds to a long, sell to a short"
+     },
+     "size": {
+      "type": "number",
+      "description": "in the market's base asset, e.g. 0.01 for 0.01 ETH"
+     },
+     "order_type": {
+      "type": "string",
+      "enum": [
+       "market",
+       "limit"
+      ],
+      "description": "limit (default) rests at its price; market fills now"
+     },
+     "price": {
+      "type": "number",
+      "description": "limit price in USD (limit orders only)"
+     },
+     "leverage": {
+      "type": "number",
+      "description": "e.g. 2 for 2x (default 1)"
+     },
+     "reduce_only": {
+      "type": "boolean",
+      "description": "only reduce an open position, never open or add"
+     },
+     "post_only": {
+      "type": "boolean",
+      "description": "rest on the book or be refused; never take liquidity"
+     }
+    },
+    "required": [
+     "side",
+     "size"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "sent": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "accepted": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "agent": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "chain_status": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "chain_answer": {},
+     "confirmation": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "refused": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "refusal_reason": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "refusal_meaning": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "note": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "client_nonce": {
+      "type": [
+       "number",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "title": "Place order"
+   },
+   "where": "local, signs"
+  },
+  {
+   "name": "close_position",
+   "title": "Close position",
+   "description": "Close the owner's position in one market \u2014 all of it, or a fraction \u2014 with a reduce-only order (market by default), with the full pre-trade check. Signed on this machine with the agent key (OS keychain or key file); the chain enforces the agent's policy and limits. Refused before anything is signed while the network reports agent trading off, or after stop_all. Every order is first confirmed by you in your AI app, unless you started the server with --orders auto.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "symbol": {
+      "type": "string",
+      "description": "market symbol as get_markets lists it, e.g. BTC, ETH or ETHUSDT"
+     },
+     "pair_id": {
+      "type": "integer",
+      "description": "or the market's pair id, e.g. 1"
+     },
+     "fraction": {
+      "type": "number",
+      "description": "how much of the position, above 0 and at most 1 (default 1: all)",
+      "exclusiveMinimum": 0,
+      "maximum": 1
+     },
+     "order_type": {
+      "type": "string",
+      "enum": [
+       "market",
+       "limit"
+      ],
+      "description": "market (default) or limit"
+     },
+     "price": {
+      "type": "number",
+      "description": "limit price in USD (limit only)"
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "sent": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "accepted": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "agent": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "chain_status": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "chain_answer": {},
+     "confirmation": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "refused": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "refusal_reason": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "refusal_meaning": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "note": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "client_nonce": {
+      "type": [
+       "number",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "title": "Close position"
+   },
+   "where": "local, signs"
+  },
+  {
+   "name": "set_tpsl",
+   "title": "Set take-profit / stop-loss",
+   "description": "Set, move or remove the take-profit and stop-loss of the owner's position in one market. A leg you do not name stays as it is; remove takes a leg off. A take-profit sits on the profit side of the mark, a stop-loss on the loss side. Signed on this machine with the agent key (OS keychain or key file); the chain enforces the agent's policy and limits. Refused before anything is signed while the network reports agent trading off, or after stop_all. Every order is first confirmed by you in your AI app, unless you started the server with --orders auto.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "symbol": {
+      "type": "string",
+      "description": "market symbol as get_markets lists it, e.g. BTC, ETH or ETHUSDT"
+     },
+     "pair_id": {
+      "type": "integer",
+      "description": "or the market's pair id, e.g. 1"
+     },
+     "take_profit": {
+      "type": "number",
+      "description": "new take-profit price in USD"
+     },
+     "stop_loss": {
+      "type": "number",
+      "description": "new stop-loss price in USD"
+     },
+     "remove": {
+      "type": "string",
+      "enum": [
+       "take_profit",
+       "stop_loss",
+       "both"
+      ],
+      "description": "take a leg off"
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "sent": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "accepted": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "agent": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "chain_status": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "chain_answer": {},
+     "confirmation": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "refused": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "refusal_reason": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "refusal_meaning": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "note": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "position_id": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "take_profit": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "stop_loss": {
+      "type": [
+       "number",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "title": "Set take-profit / stop-loss"
+   },
+   "where": "local, signs"
+  },
+  {
+   "name": "modify_order",
+   "title": "Modify order",
+   "description": "Move one resting order to a new price and/or size: a signed cancel-and-replace (the new order gets a new id and no time priority); the new order is checked against the network's rules (its margin is the chain's to judge). Signed on this machine with the agent key (OS keychain or key file); the chain enforces the agent's policy and limits. Refused before anything is signed while the network reports agent trading off, or after stop_all. Every order is first confirmed by you in your AI app, unless you started the server with --orders auto.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "order_id": {
+      "type": "integer",
+      "description": "the chain's order id, as get_orders lists it"
+     },
+     "price": {
+      "type": "number",
+      "description": "new limit price in USD (default: unchanged)"
+     },
+     "size": {
+      "type": "number",
+      "description": "new size in the base asset (default: what is left)"
+     }
+    },
+    "required": [
+     "order_id"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "sent": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "accepted": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "agent": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "chain_status": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "chain_answer": {},
+     "confirmation": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "refused": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "refusal_reason": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "refusal_meaning": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "note": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "replaced_order_id": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "client_nonce": {
+      "type": [
+       "number",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "title": "Modify order"
+   },
+   "where": "local, signs"
+  },
+  {
+   "name": "cancel_order",
+   "title": "Cancel order",
+   "description": "Cancel one of the configured owner's resting orders, as the agent. Signed on this machine with the agent key (OS keychain or key file); the chain enforces the agent's policy and limits. Refused before anything is signed while the network reports agent trading off, or after stop_all.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "order_id": {
+      "type": "integer",
+      "description": "the chain's order id, as get_orders lists it"
+     }
+    },
+    "required": [
+     "order_id"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "sent": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "accepted": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "agent": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "chain_status": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "chain_answer": {},
+     "confirmation": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "refused": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "refusal_reason": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "refusal_meaning": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "note": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "title": "Cancel order"
+   },
+   "where": "local, signs"
+  },
+  {
+   "name": "cancel_all",
+   "title": "Cancel all orders",
+   "description": "Cancel every resting order of the configured owner \u2014 in one market, or in all of them \u2014 as the agent. Signed on this machine with the agent key (OS keychain or key file); the chain enforces the agent's policy and limits. Refused before anything is signed while the network reports agent trading off, or after stop_all.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "symbol": {
+      "type": "string",
+      "description": "market symbol as get_markets lists it, e.g. BTC, ETH or ETHUSDT"
+     },
+     "pair_id": {
+      "type": "integer",
+      "description": "or the market's pair id, e.g. 1"
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "sent": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "accepted": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "agent": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "chain_status": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "chain_answer": {},
+     "confirmation": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "refused": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "refusal_reason": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "refusal_meaning": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "note": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "scope": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "title": "Cancel all orders"
+   },
+   "where": "local, signs"
+  },
+  {
+   "name": "stop_all",
+   "title": "Stop all (kill switch)",
+   "description": "Stop this server from signing anything new (only cancels, until you run `vordium-mcp resume` on this machine), then cancel every resting order. Revoking the agent itself on the chain is the owner's step in Vordex \u2192 Agents.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {}
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "stopped": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "at": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "cancel_all": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "revoke_on_chain": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "title": "Stop all (kill switch)"
+   },
+   "where": "local, signs"
+  }
+ ]
+}

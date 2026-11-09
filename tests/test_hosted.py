@@ -82,7 +82,7 @@ def test_hosted_settings():
 def test_hosted_lists_no_write_tool_and_refuses_one():
     net, cfg, chain = hosted()
     names = [t["name"] for t in handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, chain, cfg)["result"]["tools"]]
-    assert "place_order" not in names and "cancel_order" not in names and len(names) == 25
+    assert "place_order" not in names and "cancel_order" not in names and "get_order" in names and len(names) == 26
     for name in ("place_order", "cancel_order"):
         err, doc, _ = call(chain, cfg, name, {"side": "buy", "size": 1, "symbol": "ETH", "order_id": 1})
         assert err and "no tool named" in doc["reason"]
@@ -238,7 +238,7 @@ def req(url, body=None, headers=None, method=None):
 
 def test_burst_then_slow_down_per_client(server):
     url, clock, net = server
-    ping = {"jsonrpc": "2.0", "id": 41, "method": "ping"}
+    ping = {"jsonrpc": "2.0", "id": 41, "method": "prompts/get", "params": {"name": "-"}}
     for _ in range(20):
         assert req(url + "/mcp", ping, {"CF-Connecting-IP": "203.0.113.5"})[0] == 200
     s, h, b = req(url + "/mcp", ping, {"CF-Connecting-IP": "203.0.113.5"})
@@ -387,7 +387,7 @@ def test_initialize_gives_a_session_and_each_session_has_its_own_budget(server):
         assert s == 200 and len(h["Mcp-Session-Id"]) == 32
         sids.append(h["Mcp-Session-Id"])
     assert len(set(sids)) == 3
-    ping = {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+    ping = {"jsonrpc": "2.0", "id": 2, "method": "prompts/get", "params": {"name": "-"}}
     for sid in sids:                                   # 3 connections from one address: 20 at once each
         for _ in range(20):
             assert req(url + "/mcp", ping, {**ip, "Mcp-Session-Id": sid})[0] == 200
@@ -472,7 +472,7 @@ def test_a_refused_connection_does_not_spend_its_address_budget():
     srv = ThreadingHTTPServer(("127.0.0.1", 0), make_http_handler(cfg, chain, limiter, Stats(), outer))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{srv.server_address[1]}"
-    ping = {"jsonrpc": "2.0", "id": 9, "method": "ping"}
+    ping = {"jsonrpc": "2.0", "id": 9, "method": "prompts/get", "params": {"name": "-"}}
     loud = [req(url + "/mcp", ping, {"CF-Connecting-IP": "192.0.2.4", "Mcp-Session-Id": "a" * 32})[0] for _ in range(10)]
     quiet = req(url + "/mcp", ping, {"CF-Connecting-IP": "192.0.2.4", "Mcp-Session-Id": "b" * 32})[0]
     srv.shutdown(); srv.server_close()
@@ -575,3 +575,15 @@ def test_a_slow_or_unkept_shared_read_still_reaches_the_network_once():
     [t.start() for t in ts]
     [t.join() for t in ts]
     assert calls == [f"{R}/z"]
+
+
+def test_listing_what_the_server_offers_costs_no_connection_budget(server):
+    """a scanner or client that lists tools, prompts and resources many times is never told to slow down for it
+    (only tools/call and the other real requests spend a connection's budget; the address budget still applies)."""
+    url, clock, net = server
+    ip = {"CF-Connecting-IP": "198.51.100.7"}
+    s, h, b = req(url + "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}, ip)
+    sid = {**ip, "Mcp-Session-Id": h["Mcp-Session-Id"]}
+    for i in range(15):                                   # 60 listing calls on one connection: its own bucket holds 20
+        for m in ("tools/list", "prompts/list", "resources/list", "ping"):
+            assert req(url + "/mcp", {"jsonrpc": "2.0", "id": i, "method": m}, sid)[0] == 200, (i, m)

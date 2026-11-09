@@ -26,6 +26,12 @@ class Config:
     trust_proxy: bool = False
     hosted: bool = False
     short_cache_s: float = 0.0
+    # "ask": every order is confirmed by the user in the AI app (MCP elicitation) before it is signed; "auto": orders
+    # within the agent's limits on the chain go through without asking (the user's own choice, never the default)
+    orders: str = "ask"
+    agent_key_passphrase_file: Optional[str] = None
+    # where stop_all leaves its lock (a stopped server refuses every write until `vordium-mcp resume`)
+    state_dir: str = "~/.vordium-mcp"
 
 
 def parser():
@@ -33,7 +39,8 @@ def parser():
         prog="vordium-mcp",
         description="Vordium MCP server. Runs on your machine over stdio; reads the Vordium testnet unless told otherwise.",
         epilog="Each setting can also come from the environment: VORDIUM_MCP_NETWORK, VORDIUM_MCP_REST, "
-               "VORDIUM_MCP_ALLOW_TRADING=1, VORDIUM_MCP_OWNER, VORDIUM_MCP_AGENT_KEY_FILE, VORDIUM_MCP_HTTP, "
+               "VORDIUM_MCP_ALLOW_TRADING=1, VORDIUM_MCP_OWNER, VORDIUM_MCP_AGENT_KEY_FILE, VORDIUM_MCP_AGENT_KEY_PASSPHRASE_FILE, "
+               "VORDIUM_MCP_ORDERS (ask|auto), VORDIUM_MCP_STATE_DIR, VORDIUM_MCP_HTTP, "
                "VORDIUM_MCP_RATE_PER_MINUTE, VORDIUM_MCP_BURST, VORDIUM_MCP_ALLOW_ORIGINS (comma-separated), VORDIUM_MCP_HOSTED=1. "
                "A flag wins over the environment.")
     p.add_argument("--network", choices=("testnet", "mainnet"),
@@ -42,10 +49,16 @@ def parser():
     p.add_argument("--spec", help=argparse.SUPPRESS)
     p.add_argument("--truth", help=argparse.SUPPRESS)
     p.add_argument("--allow-trading", action="store_true",
-                   help="let place_order and cancel_order sign with the agent key (still refused while the network "
-                        "reports agent trading off)")
+                   help="let the write tools sign with the agent key (still refused while the network reports agent "
+                        "trading off)")
     p.add_argument("--owner", help="the owner account whose registered agent trades")
-    p.add_argument("--agent-key-file", help="file holding the agent's private key (mode 600); read only when signing")
+    p.add_argument("--agent-key-file", help="the agent key in a file (mode 600), or an encrypted keystore; without it the "
+                                            "key is read from the OS keychain (vordium-mcp key store)")
+    p.add_argument("--agent-key-passphrase-file", help="file (mode 600) holding the passphrase of an encrypted keystore")
+    p.add_argument("--orders", choices=("ask", "auto"),
+                   help="ask (default): you confirm every order in your AI app before it is signed; auto: orders within "
+                        "the agent's limits on the chain go through without asking")
+    p.add_argument("--state-dir", help="where a stop_all lock is kept (default ~/.vordium-mcp)")
     p.add_argument("--http", metavar="HOST:PORT",
                    help="serve read-only over streamable HTTP at /mcp instead of stdio (no write tools, no keys)")
     p.add_argument("--rate-per-minute", type=int, help="HTTP: requests per minute per client address (default 120); hosted: per "
@@ -74,6 +87,19 @@ def load(argv=None, env=None):
     keyfile = a.agent_key_file or env.get("VORDIUM_MCP_AGENT_KEY_FILE") or None
     if owner and not ADDRESS.match(owner):
         raise ConfigError("--owner must be a 0x-prefixed 20-byte address")
+    passfile = a.agent_key_passphrase_file or env.get("VORDIUM_MCP_AGENT_KEY_PASSPHRASE_FILE") or None
+    orders = a.orders or str(env.get("VORDIUM_MCP_ORDERS") or "ask").strip().lower()
+    if orders not in ("ask", "auto"):
+        raise ConfigError("--orders is ask or auto")
+    if not http and (keyfile or passfile):          # a key others can read is refused before the server starts
+        from .keys import KeyError_, check_private_file
+        try:
+            if keyfile:
+                check_private_file(keyfile)
+            if passfile:
+                check_private_file(passfile, "the passphrase file")
+        except KeyError_ as e:
+            raise ConfigError(f"refusing to start: {e}")
     if http:
         if allow or keyfile:
             raise ConfigError("the HTTP server is read-only: it takes no trading flag and no key")
@@ -107,4 +133,7 @@ def load(argv=None, env=None):
         trust_proxy=bool(a.trust_proxy) or hosted,
         hosted=hosted,
         short_cache_s=2.0 if hosted else 0.0,
+        orders=orders,
+        agent_key_passphrase_file=passfile,
+        state_dir=a.state_dir or env.get("VORDIUM_MCP_STATE_DIR") or "~/.vordium-mcp",
     )

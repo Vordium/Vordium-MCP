@@ -10,13 +10,15 @@ Rules this file enforces:
 
 The limits an agent trades under are enforced by the chain, on every validator. This server only refuses early.
 """
-import math
-from . import pretrade
+import math, threading
+from . import keys, pretrade
 import time
 import re
 
 from . import reads
 from .chain import ChainUnreachable
+from .networks import NETWORKS
+from .schemas import LOCAL_READ, OUTPUT, READ, WRITE
 from .reads import NotServed, short, usd, amount
 
 ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
@@ -30,10 +32,9 @@ USDC_6DEC = 10 ** 6        # account figures are 6-decimal USDC integers
 
 
 class Refusal(Exception):
-    def __init__(self, reason, readings=None, remedy=None):
+    def __init__(self, reason, readings=None, remedy=None, note="Nothing was signed or sent."):
         super().__init__(reason)
-        self.payload = {"refused": True, "reason": reason, "readings": readings or {}, "remedy": remedy,
-                        "note": "Nothing was signed or sent."}
+        self.payload = {"refused": True, "reason": reason, "readings": readings or {}, "remedy": remedy, "note": note}
 
 
 def reject_key_material(params, hashes=()):
@@ -452,16 +453,15 @@ def _agent_ready(chain, cfg, signer):
     blockers, readings = [], {}
     if not cfg.allow_trading:
         blockers.append({"blocker": "trading not allowed by the operator",
-                         "detail": "start the server with --allow-trading (or VORDIUM_MCP_ALLOW_TRADING=1) to let it "
-                                   "sign orders with the agent key"})
+                         "detail": "start the server with --allow-trading to let it sign orders with the agent key"})
     if not cfg.owner:
-        blockers.append({"blocker": "no owner account", "detail": "set --owner (VORDIUM_MCP_OWNER)"})
-    if not cfg.agent_key_file:
-        blockers.append({"blocker": "no agent key", "detail": "set --agent-key-file (VORDIUM_MCP_AGENT_KEY_FILE)"})
+        blockers.append({"blocker": "no owner account", "detail": "start the server with --owner (your account address)"})
+    if cfg.owner and keys.source(cfg)[0] is None:
+        blockers.append({"blocker": "no agent key", "detail": keys.source(cfg)[1]})
     if blockers:
         return blockers, readings, None
     try:
-        agent = signer.agent_address(cfg.agent_key_file)
+        agent = signer.agent_address(cfg)
     except Exception as e:                                          # the message never carries the key
         blockers.append({"blocker": "agent key unusable", "detail": str(e)[:240]})
         return blockers, readings, None
@@ -499,16 +499,88 @@ def _agent_ready(chain, cfg, signer):
     return blockers, readings, agent
 
 
-def _write(chain, cfg, kind, params, do, precheck=None):
+# Writes that change what the account holds are confirmed by the user (MCP elicitation) unless the user chose
+# --orders auto; cancels only take risk off and stop_all must never wait on a dialog.
+ASKS = ("place_order", "close_position", "modify_order", "set_tpsl")
+# After stop_all, only cancels are signed until `vordium-mcp resume`.
+WHILE_STOPPED = ("cancel_order", "cancel_all", "stop_all")
+CTX = threading.local()
+
+
+def _num(x):
+    """a figure exactly as entered (no rounding, no exponent), for the user to confirm"""
+    from decimal import Decimal
+    try:
+        d = Decimal(str(x)).normalize()
+    except Exception:
+        return str(x)
+    return format(d, "f")
+
+
+def _resume_hint(cfg):
+    import os
+    extra = "" if os.path.expanduser(cfg.state_dir) == os.path.expanduser("~/.vordium-mcp") else f" --state-dir {cfg.state_dir}"
+    return f"vordium-mcp resume --owner {cfg.owner} --network {cfg.network}{extra}"
+
+
+def _session():
+    return getattr(CTX, "session", None)
+
+
+def stop_lock(cfg):
+    import os
+    return os.path.join(os.path.expanduser(cfg.state_dir), f"stopped-{cfg.network}-{str(cfg.owner or 'none').lower()}.json")
+
+
+def stopped(cfg):
+    import json as _json, os
+    p = stop_lock(cfg)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return _json.load(fh)
+    except Exception:
+        return {"at": "unknown"}
+
+
+def _confirm(cfg, kind, summary, details):
+    """The user says yes in their AI app before anything is signed, or nothing is signed."""
+    if kind not in ASKS or cfg.orders == "auto":
+        return {"asked": False, "why": "not an order" if kind not in ASKS else "--orders auto (the user's choice)"}
+    s = _session()
+    if s is None or not s.can_elicit():
+        raise Refusal(f"{kind} refused: this AI app cannot ask you to confirm the order (it does not support MCP "
+                      "elicitation), and every order is confirmed by you before it is signed",
+                      readings={"order": details},
+                      remedy="Use an AI app that supports MCP elicitation, or restart the server with --orders auto to "
+                             "let orders within the agent's limits on the chain go through without asking. Nothing was "
+                             "signed or sent.")
+    answer = s.elicit(summary + " Sign it with your agent key?",
+                      {"type": "object", "properties": {"confirm": {"type": "boolean", "title": "Sign this order",
+                                                                    "description": summary, "default": False}},
+                       "required": ["confirm"]})
+    if not (isinstance(answer, dict) and answer.get("action") == "accept"
+            and isinstance(answer.get("content"), dict) and answer["content"].get("confirm") is True):
+        raise Refusal(f"{kind}: you did not confirm it (answer: {(answer or {}).get('action', 'none')})",
+                      remedy="Nothing was signed or sent.")
+    return {"asked": True, "confirmed": True}
+
+
+def _write(chain, cfg, kind, params, do, precheck=None, describe=None):
     network_identity(chain)
     if cfg.read_only:
         raise Refusal(f"{kind} is not available on a read-only server")
+    held = stopped(cfg)
+    if held is not None and kind not in WHILE_STOPPED:
+        raise Refusal(f"{kind} refused: this server was stopped with stop_all ({held.get('at')}); only cancels are signed",
+                      remedy=f"Run `{_resume_hint(cfg)}` on this machine to allow trading again. Nothing was signed or sent.")
     sw = _refuse_switch_off(chain)
     from . import signer
     blockers, readings, agent = _agent_ready(chain, cfg, signer)
     readings["policy_switch"] = sw
     pair = None
-    if kind == "place_order":
+    if kind in ("place_order", "close_position", "modify_order", "set_tpsl"):
         pair = _pair(chain, params, required=False)
         if pair is None:
             blockers.append({"blocker": "market not found", "detail": f"{params.get('symbol') or params.get('pair_id')!r}"})
@@ -521,9 +593,23 @@ def _write(chain, cfg, kind, params, do, precheck=None):
                       remedy="Each blocker names the reading it came from. Nothing was signed or sent.")
     if precheck is not None:
         precheck(agent, pair)                          # every network rule first: an order that would be refused is not signed
-    answer = do(signer, agent, pair)
+    asked = _confirm(cfg, kind, *(describe(pair) if describe else (f"{kind}.", dict(params))))
+    held = stopped(cfg)                                # stop_all may have run (here or in another process) while the user decided
+    if held is not None and kind not in WHILE_STOPPED:
+        raise Refusal(f"{kind} refused: this server was stopped with stop_all ({held.get('at')}) while the order waited",
+                      remedy=f"Run `{_resume_hint(cfg)}` to allow trading again. Nothing was signed or sent.")
+    try:
+        answer = do(signer, agent, pair)
+    except Refusal:
+        raise
+    except Exception as e:
+        raise Refusal(f"{kind}: it failed while signing or sending ({type(e).__name__}: {str(e)[:200]}); it may have reached "
+                      "the chain", remedy="Read get_orders and get_positions before trying again.",
+                      note="It may have been signed and sent: check before trying again.")
     code = answer.get("status_code") if isinstance(answer, dict) else None
-    return {"network": chain.network, "sent": True, "agent": agent, "chain_status": code, "chain_answer": answer,
+    return {"summary": f"{kind}: " + ("received by the chain." if isinstance(code, int) and 200 <= code < 300 else
+                                      f"the chain answered {code}."),
+            "network": chain.network, "sent": True, "agent": agent, "confirmation": asked, "chain_status": code, "chain_answer": answer,
             "accepted": isinstance(code, int) and 200 <= code < 300,
             "note": "This is the chain's own answer, unchanged. Accepted means received, not filled: read "
                     "get_orders and get_positions to see what the chain applied. The chain enforces the agent's "
@@ -535,6 +621,10 @@ TYPES = {"market": 0, "limit": 1}
 
 
 def place_order(chain, cfg, params):
+    return _place(chain, cfg, params, "place_order")
+
+
+def _place(chain, cfg, params, kind):
     side = SIDES.get(str(params.get("side", "")).strip().lower())
     otype = TYPES.get(str(params.get("order_type", "limit")).strip().lower())
     if side is None:
@@ -558,12 +648,12 @@ def place_order(chain, cfg, params):
         try:
             ctx = pretrade.Ctx(chain, cfg.owner, pair["pair_id"], agent)
         except pretrade.Unreadable as e:             # an order is never signed unchecked
-            raise Refusal(f"place_order refused: the order could not be checked against the network ({e})",
+            raise Refusal(f"{kind} refused: the order could not be checked against the network ({e})",
                           remedy="Nothing was signed or sent. Try again when the network answers.")
         o = pretrade.snap(ctx, _chain_order(pair["pair_id"], params, side, otype, size, price, leverage))   # as the signer sends it
         r = pretrade.check(ctx, o)
         if not r["can_place"]:
-            raise Refusal("place_order refused before signing — the network would refuse it: "
+            raise Refusal(f"{kind} refused before signing — the network would refuse it: "
                           + "; ".join(f["words"] for f in r["failed"]),
                           readings={"failed": r["failed"], "figures": r["figures"], "not_checked": r["not_checked"]},
                           remedy="Fixes that pass: " + ("; ".join(f["label"] for f in r["fixes"] if f.get("passes")) or "none worked out")
@@ -573,9 +663,20 @@ def place_order(chain, cfg, params):
         return signer.place(cfg, chain.rest, pair_id=pair["pair_id"], side=side, size=size, price=price,
                             leverage=leverage, order_type=otype, reduce_only=bool(params.get("reduce_only", False)),
                             post_only=bool(params.get("post_only", False)), client_nonce=nonce)
-    out = _write(chain, cfg, "place_order", params, do, precheck)
+    def describe(pair):
+        what = (f"{'Buy' if side == 0 else 'Sell'} {_num(params.get('size'))} {pair.get('name') or pair.get('symbol')} "
+                + (f"at {_num(params.get('price'))} (limit)" if otype == 1 else "at the market price")
+                + f", {_num(params.get('leverage', 1))}x"
+                + (", reduce only" if params.get("reduce_only") else "") + f", on the {chain.network}.")
+        return what, {"market": pair.get("name") or pair.get("symbol"), "side": "buy" if side == 0 else "sell", "size": size,
+                      "order_type": "limit" if otype == 1 else "market", "price": price if otype == 1 else None,
+                      "leverage": leverage, "reduce_only": bool(params.get("reduce_only", False))}
+    out = _write(chain, cfg, kind, params, do, precheck, describe)
     if out.get("accepted"):
-        why = refusal_of(chain, out.get("agent"), nonce)
+        try:
+            why = refusal_of(chain, out.get("agent"), nonce)
+        except Exception:
+            why, out["refusal_check"] = None, "the chain's refusal record could not be read; get_orders shows what it applied"
         if why is not None:
             out.update(accepted=False, refused=True, refusal_reason=why,
                        note="The chain received the order and then refused it (its agent_refused record names the reason). "
@@ -606,7 +707,7 @@ def check_order(chain, cfg, params):
     otype = TYPES.get(str(params.get("order_type", "limit")).strip().lower())
     if side is None or otype is None:
         raise Refusal("side is buy or sell; order_type is market or limit")
-    agent = signer.agent_address(cfg.agent_key_file) if cfg.agent_key_file else None
+    agent = signer.agent_address(cfg) if keys.source(cfg)[0] else None
     ctx = pretrade.Ctx(chain, cfg.owner, pair["pair_id"], agent)
     lev = params.get("leverage")
     leverage = float(lev) if lev not in (None, "") else (pretrade.leverage_cap(ctx) or 10000) / 10000
@@ -622,7 +723,7 @@ def my_buying_power(chain, cfg, params):
     from . import signer
     if not cfg.owner:
         raise Refusal("my_buying_power needs the owner account: start the server with --owner")
-    agent = signer.agent_address(cfg.agent_key_file) if cfg.agent_key_file else None
+    agent = signer.agent_address(cfg) if keys.source(cfg)[0] else None
     pairs = [_pair(chain, params, required=True)] if params.get("symbol") or params.get("pair_id") else chain.pairs()[:5]
     out = []
     for p in pairs:
@@ -649,7 +750,11 @@ def refusal_meanings(chain):
 
 
 def _add_meaning(chain, out):
-    meaning = refusal_meanings(chain).get(out.get("refusal_reason"))
+    """the network's own words for a refusal; read after the order was sent, so a failed read never turns into an error"""
+    try:
+        meaning = refusal_meanings(chain).get(out.get("refusal_reason"))
+    except Exception:
+        return
     if meaning:
         out["refusal_meaning"] = meaning
 
@@ -700,12 +805,296 @@ def cancel_order(chain, cfg, params):
     return out
 
 
+
+# ── closing the circle: one order, one position, everything at once ──
+CAP_BITS = {"place": 1, "cancel": 2, "modify": 4, "tpsl": 8, "close": 16}
+
+
+def _owner(cfg, params, what):
+    a = params.get("address") or cfg.owner
+    if not a:
+        raise Refusal(f"{what} needs an account: give address, or start the server with --owner")
+    return _address({"address": a})
+
+
+def _rows(raw, key):
+    return raw if isinstance(raw, list) else ((raw or {}).get(key) or [])
+
+
+def _open_order(chain, owner, order_id):
+    o = chain.orders(owner)
+    rows = _rows(chain.require(o, "open orders"), "orders")
+    hit = next((r for r in rows if str(r.get("id", r.get("order_id"))) == str(order_id)), None)
+    return hit, o
+
+
+def _position(chain, owner, pair_id):
+    pos = chain.positions(owner)
+    rows = _rows(chain.require(pos, "positions"), "positions")
+    hit = next((p for p in rows if p.get("pair_id") == pair_id and int(str(p.get("size", p.get("size_18dec", 0))) or 0) != 0), None)
+    return hit, pos
+
+
+def _caps_refusal(chain, cfg, agent, cap, kind):
+    """The agent's own permission for this kind of write, as the chain stores it (None = allowed or not published)."""
+    a = chain.agent(cfg.owner, agent)
+    rec = a["json"] if a.ok and isinstance(a["json"], dict) else {}
+    pol = rec.get("policy_v1") if isinstance(rec.get("policy_v1"), dict) else None
+    bits = pol.get("caps_bitmask") if pol else None
+    if isinstance(bits, int) and bits and not bits & CAP_BITS[cap]:
+        return Refusal(f"{kind} refused: this agent is not allowed to {cap} (its permissions on the chain: caps {bits})",
+                       readings={"agent": source(a)[0], "caps_bitmask": bits},
+                       remedy=f"The owner can allow '{cap}' in the agent's permissions (Vordex → Agents → Edit). Nothing "
+                              "was signed or sent.")
+    return None
+
+
+def get_order(chain, cfg, params):
+    network_identity(chain)
+    owner = _owner(cfg, params, "get_order")
+    try:
+        order_id = int(params.get("order_id"))
+    except (TypeError, ValueError, OverflowError):
+        raise Refusal("order_id must be the chain's order id (get_orders lists them)")
+    hit, o = _open_order(chain, owner, order_id)
+    if hit is None:
+        return {"summary": f"Order {order_id} is not resting for {short(owner)} now: it filled, was cancelled, or is "
+                           "another account's. get_fills shows the account's trades.",
+                "network": chain.network, "address": owner, "order_id": order_id, "found": False, "order": None,
+                "source": source(o)}
+    m = chain.pair_by_id(hit.get("pair_id")) or {}
+    hit.setdefault("symbol", m.get("symbol"))
+    return {"summary": f"Order {order_id}: {str(hit.get('side', '')).lower()} {hit.get('symbol')} "
+                       f"{hit.get('order_type', '')}, {amount(hit.get('remaining_18dec'), 18)} left of {amount(hit.get('size'), 18)}.",
+            "network": chain.network, "address": owner, "order_id": order_id, "found": True, "order": hit,
+            "source": source(o)}
+
+
+def close_position(chain, cfg, params):
+    """A reduce-only order against the owner's position in one market: all of it, or a fraction."""
+    network_identity(chain)
+    if not cfg.owner:
+        raise Refusal("close_position needs the owner account: start the server with --owner")
+    pair = _pair(chain, params, required=True)
+    pos, _ = _position(chain, cfg.owner, pair["pair_id"])
+    if pos is None:
+        raise Refusal(f"close_position: {cfg.owner} has no open position in {pair.get('name') or pair.get('symbol')}",
+                      remedy="get_positions lists the account's positions. Nothing was signed or sent.")
+    try:
+        frac = float(params.get("fraction", 1))
+    except (TypeError, ValueError):
+        raise Refusal("fraction is a number above 0, at most 1 (default 1: the whole position)")
+    if not (0 < frac <= 1):
+        raise Refusal("fraction is above 0 and at most 1 (default 1: the whole position)")
+    from decimal import Decimal
+    size = Decimal(abs(int(str(pos.get("size", pos.get("size_18dec")))))) * Decimal(str(frac)) / Decimal(10 ** 18)
+    otype = str(params.get("order_type", "market")).strip().lower()
+    order = {"pair_id": pair["pair_id"], "side": "sell" if pos.get("is_long") else "buy", "size": format(size, "f"),
+             "order_type": otype, "leverage": float(pos.get("leverage") or 1), "reduce_only": True}
+    if otype == "limit":
+        order["price"] = params.get("price")
+    return _place(chain, cfg, order, "close_position")
+
+
+def cancel_all(chain, cfg, params):
+    """Every open order of the owner (one market, or all of them), as the agent."""
+    pair = _pair(chain, params, required=False) if (params.get("symbol") or params.get("pair_id")) else None
+    if (params.get("symbol") or params.get("pair_id")) and pair is None:
+        raise Refusal("cancel_all: no market on this network matches that symbol or pair_id")
+    ms = chain.market_specs()
+    one_shot = ms.ok and isinstance(ms["json"], dict) and (ms["json"].get("specs") or {}).get("mm_release_active") is True
+
+    def do(signer, agent, _pair):
+        if one_shot:
+            return signer.cancel_all(cfg, chain.rest, pair_id=(pair or {}).get("pair_id", 0))
+        # this network cancels one order at a time
+        listed = _rows(chain.require(chain.orders(cfg.owner), "open orders"), "orders")
+        mine = [r for r in listed if pair is None or r.get("pair_id") == pair["pair_id"]]
+        answers = []
+        for r in mine:
+            oid = int(r.get("id", r.get("order_id")))
+            try:
+                answers.append({"order_id": oid, **signer.cancel(cfg, chain.rest, order_id=oid)})
+            except Exception as e:                      # the rest are still tried; each answer says what happened
+                answers.append({"order_id": oid, "status_code": None, "error": f"{type(e).__name__}: {str(e)[:120]}"})
+        ok = all(isinstance(a.get("status_code"), int) and 200 <= a["status_code"] < 300 for a in answers)
+        return {"status_code": 202 if ok else 400, "one_by_one": len(answers), "answers": answers}
+    out = _write(chain, cfg, "cancel_all", params, do)
+    out["scope"] = (pair or {}).get("name") or (pair or {}).get("symbol") or "every market"
+    return out
+
+
+def modify_order(chain, cfg, params):
+    """A resting order to a new price and/or size: a signed cancel-and-replace (a new order id, no time priority)."""
+    from decimal import Decimal
+    network_identity(chain)
+    if not cfg.owner:
+        raise Refusal("modify_order needs the owner account: start the server with --owner")
+    try:
+        order_id = int(params.get("order_id"))
+    except (TypeError, ValueError, OverflowError):
+        raise Refusal("order_id must be the chain's order id (get_orders lists them)")
+    hit, _ = _open_order(chain, cfg.owner, order_id)
+    if hit is None:
+        raise Refusal(f"modify_order: order {order_id} is not resting for {cfg.owner}",
+                      remedy="get_orders lists the open orders. Nothing was signed or sent.")
+    specs = chain.market_specs()
+    if not (specs.ok and isinstance(specs["json"], dict) and (specs["json"].get("specs") or {}).get("mm_release_active") is True):
+        raise Refusal("modify_order: this network does not change orders in place",
+                      remedy="Cancel the order (cancel_order) and place a new one (place_order). Nothing was signed or sent.")
+    try:
+        new_price = int(Decimal(str(params["price"])) * 10 ** 8) if params.get("price") not in (None, "") else int(hit.get("price_8dec") or 0)
+        new_size = int(Decimal(str(params["size"])) * 10 ** 18) if params.get("size") not in (None, "") else int(str(hit.get("remaining_18dec") or hit.get("size")))
+    except Exception:
+        raise Refusal("price and size must be numbers")
+    if new_price <= 0 or new_size <= 0:
+        raise Refusal("modify_order needs a price and a size above 0")
+    if new_price == int(hit.get("price_8dec") or 0) and new_size == int(str(hit.get("remaining_18dec") or hit.get("size") or 0)):
+        raise Refusal("modify_order: that is the order as it rests now; give a new price or size")
+    side = "buy" if str(hit.get("side", "")).lower().startswith("b") else "sell"
+    nonce = int(time.time() * 1000)
+    p2 = {**params, "pair_id": hit.get("pair_id")}
+
+    def precheck(agent, pair):
+        r = _caps_refusal(chain, cfg, agent, "modify", "modify_order")
+        if r is not None:
+            raise r
+        try:
+            ctx = pretrade.Ctx(chain, cfg.owner, pair["pair_id"], agent)
+        except pretrade.Unreadable as e:
+            raise Refusal(f"modify_order refused: the new order could not be checked against the network ({e})",
+                          remedy="Nothing was signed or sent. Try again when the network answers.")
+        o = {"pair_id": pair["pair_id"], "side": side, "size_18dec": new_size, "price_8dec": new_price, "order_type": "limit",
+             "reduce_only": bool(hit.get("reduce_only")), "post_only": bool(hit.get("post_only")),
+             "leverage_bps": int(hit.get("leverage_bps") or 10000)}
+        r = pretrade.check(ctx, pretrade.snap(ctx, o))
+        # the order it replaces leaves the book first, so its own margin and size are free again: those rules are the
+        # chain's to judge here
+        failed = [f for f in r["failed"] if f.get("rule") not in ("margin", "position")]
+        if failed:
+            raise Refusal("modify_order refused before signing — the network would refuse the new order: "
+                          + "; ".join(f["words"] for f in failed),
+                          readings={"failed": failed, "figures": r["figures"]}, remedy="Nothing was signed or sent.")
+
+    def describe(pair):
+        from decimal import Decimal
+        what = (f"Change order {order_id} ({side} {pair.get('name') or pair.get('symbol')}) to "
+                f"{_num(Decimal(new_size) / Decimal(10 ** 18))} at {_num(Decimal(new_price) / Decimal(10 ** 8))}, on the "
+                f"{chain.network}: it leaves the book and a new order rests in its place.")
+        return what, {"order_id": order_id, "new_price": new_price / 1e8, "new_size": new_size / 1e18}
+
+    def do(signer, agent, pair):
+        return signer.modify(cfg, chain.rest, order_id, new_price, new_size, pair["pair_id"], side, nonce)
+    out = _write(chain, cfg, "modify_order", p2, do, precheck, describe)
+    out.update(replaced_order_id=order_id, client_nonce=nonce,
+               note="Accepted means received: the new order has a new id (get_orders lists it).")
+    return out
+
+
+def set_tpsl(chain, cfg, params):
+    """Set, move or remove the take-profit and stop-loss of the owner's position in one market."""
+    from decimal import Decimal
+    network_identity(chain)
+    if not cfg.owner:
+        raise Refusal("set_tpsl needs the owner account: start the server with --owner")
+    pair = _pair(chain, params, required=True)
+    pos, _ = _position(chain, cfg.owner, pair["pair_id"])
+    if pos is None:
+        raise Refusal(f"set_tpsl: {cfg.owner} has no open position in {pair.get('name') or pair.get('symbol')}",
+                      remedy="A take-profit or stop-loss belongs to an open position. Nothing was signed or sent.")
+    pid = pos.get("id", pos.get("position_id"))
+    t = chain.read(f"/tpsl/{cfg.owner}", cache=False)
+    if not (t.ok and isinstance(t["json"], (list, dict))):
+        raise Refusal("set_tpsl: the position's take-profit and stop-loss could not be read, so the leg you did not name "
+                      "cannot be kept", readings={"tpsl": source(t)[0]},
+                      remedy="Nothing was signed or sent. Try again when the network answers.")
+    rows = _rows(t["json"], "orders")
+    cur = next((r for r in rows if str(r.get("position_id")) == str(pid)), {}) if rows else {}
+    now_tp, now_sl = int(cur.get("take_profit") or 0), int(cur.get("stop_loss") or 0)
+    remove = str(params.get("remove", "")).strip().lower()
+    if remove not in ("", "take_profit", "stop_loss", "both"):
+        raise Refusal("remove is take_profit, stop_loss or both")
+
+    def leg(name, now, gone):
+        if gone:
+            return 0
+        v = params.get(name)
+        if v in (None, ""):
+            return now
+        try:
+            x = int(Decimal(str(v)) * 10 ** 8)
+        except Exception:
+            raise Refusal(f"{name} must be a price")
+        if x <= 0:
+            raise Refusal(f"{name} must be above 0 (use remove to take it off)")
+        return x
+    tp = leg("take_profit", now_tp, remove in ("take_profit", "both"))
+    sl = leg("stop_loss", now_sl, remove in ("stop_loss", "both"))
+    if (tp, sl) == (now_tp, now_sl):
+        raise Refusal("set_tpsl: nothing would change (give take_profit, stop_loss, or remove)")
+    mark = next((p.get("mark_price") for p in (chain.oracle()["json"] or {}).get("prices", []) if p.get("pair_id") == pair["pair_id"]), None) \
+        if chain.oracle().ok and isinstance(chain.oracle()["json"], dict) else None
+    long_ = bool(pos.get("is_long"))
+    if isinstance(mark, (int, float)) and mark > 0:
+        m8 = int(mark * 10 ** 8)
+        if tp and tp != now_tp and (tp <= m8 if long_ else tp >= m8):
+            raise Refusal(f"set_tpsl: a take-profit for a {'long' if long_ else 'short'} sits {'above' if long_ else 'below'} "
+                          f"the mark ({mark:g})", remedy="Nothing was signed or sent.")
+        if sl and sl != now_sl and (sl >= m8 if long_ else sl <= m8):
+            raise Refusal(f"set_tpsl: a stop-loss for a {'long' if long_ else 'short'} sits {'below' if long_ else 'above'} "
+                          f"the mark ({mark:g})", remedy="Nothing was signed or sent.")
+
+    def precheck(agent, _pair):
+        r = _caps_refusal(chain, cfg, agent, "tpsl", "set_tpsl")
+        if r is not None:
+            raise r
+
+    def describe(_pair):
+        from decimal import Decimal
+        f = lambda v: "none" if not v else _num(Decimal(v) / Decimal(10 ** 8))
+        return (f"{pair.get('name') or pair.get('symbol')} {'long' if long_ else 'short'} position: take-profit {f(tp)}, "
+                f"stop-loss {f(sl)} (now {f(now_tp)} / {f(now_sl)}), on the {chain.network}."), {"take_profit": tp / 1e8 or None,
+                                                                                               "stop_loss": sl / 1e8 or None}
+
+    def do(signer, agent, _pair):
+        return signer.set_tpsl(cfg, chain.rest, pair["pair_id"], pid, tp, sl)
+    out = _write(chain, cfg, "set_tpsl", {**params, "pair_id": pair["pair_id"]}, do, precheck, describe)
+    out.update(position_id=pid, take_profit=tp / 1e8 or None, stop_loss=sl / 1e8 or None)
+    return out
+
+
+def stop_all(chain, cfg, params):
+    """The kill switch: this server stops signing (locked until `vordium-mcp resume`), then every open order is cancelled."""
+    import json as _json, os
+    network_identity(chain)
+    if not cfg.owner:
+        raise Refusal("stop_all needs the owner account: start the server with --owner")
+    p = stop_lock(cfg)
+    os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+    at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with open(p, "w", encoding="utf-8") as fh:
+        _json.dump({"at": at, "network": chain.network, "owner": cfg.owner}, fh)
+    try:
+        cancelled = cancel_all(chain, cfg, {})
+        cancel_note = cancelled.get("summary")
+    except Refusal as r:
+        cancelled, cancel_note = None, f"open orders were NOT cancelled: {r.payload.get('reason')}"
+    except Exception as e:
+        cancelled, cancel_note = None, (f"open orders may NOT be cancelled ({type(e).__name__}): read get_orders and cancel "
+                                        "them with cancel_all")
+    app = (NETWORKS.get(chain.network) or {}).get("app", "")
+    return {"summary": f"Stopped at {at}: this server signs nothing new (only cancels) until `{_resume_hint(cfg)}`. "
+                       f"{cancel_note} To end the agent itself on the chain, revoke it in Vordex → Agents (your wallet signs).",
+            "network": chain.network, "stopped": True, "at": at, "lock": p, "cancel_all": cancelled,
+            "revoke_on_chain": f"{app}/agents" if app else None,
+            "note": "An agent key cannot revoke itself on the chain: only the owner can (Agents → Revoke)."}
+
+
 # ── schemas ──────────────────────────────────────────────────────────────────
 ADDR = {"type": "string", "description": "0x-prefixed 20-byte account address (0x followed by 40 hex characters)",
         "pattern": "^0x[0-9a-fA-F]{40}$"}
 MARKET = {"symbol": {"type": "string", "description": "market symbol as get_markets lists it, e.g. BTC, ETH or ETHUSDT"},
           "pair_id": {"type": "integer", "description": "or the market's pair id, e.g. 1"}}
-RO = {"readOnlyHint": True, "openWorldHint": True, "idempotentHint": True}
 SEASON = {"season_id": {"type": "integer", "description": "a season number (default: the current season)"}}
 
 
@@ -714,7 +1103,7 @@ def _t(name, title, description, properties=None, required=None, handler=None):
     if required:
         schema["required"] = required
     return {"name": name, "title": title, "description": description, "inputSchema": schema,
-            "annotations": {**RO, "title": title}, "handler": handler}
+            "outputSchema": OUTPUT[name], "annotations": {**READ, "title": title}, "handler": handler}
 
 
 TOOLS = [
@@ -729,8 +1118,8 @@ TOOLS = [
        "Every market the network lists, with its state, leverage, fees and trading rules (tick, lot, minimum size). "
        "Ask: \"Which markets can I trade?\"", handler=get_markets),
     _t("get_fees", "Fees and margins",
-       "Maker and taker fees, maximum leverage, initial and maintenance margin and the liquidation fee, for every "
-       "market or one. Ask: \"What does it cost to trade BTC with 10x?\"", dict(MARKET), handler=reads.get_fees),
+       "Maker and taker fees, maximum leverage, initial and maintenance margin, and the liquidation terms as the network "
+       "publishes them (the fee, or none), for every market or one. Ask: \"What does it cost to trade BTC with 10x?\"", dict(MARKET), handler=reads.get_fees),
     _t("get_oracle", "Prices",
        "Oracle and mark prices, for every market or one. Ask: \"What is the ETH price?\"", dict(MARKET),
        handler=get_oracle),
@@ -817,42 +1206,92 @@ TOOLS = [
     _t("get_address", "Address",
        "An address summary: account value, open positions, agents and EVM transactions, with its explorer link. Ask: "
        "\"Look up 0x…\"", {"address": ADDR}, ["address"], reads.get_address),
-    {"name": "place_order", "title": "Place order",
-     "description": "Place a market or limit order as the configured agent. Signed on this machine with the agent key "
-                    "set in the server's configuration; refused before anything is signed while the network reports "
-                    "agent trading off. The chain enforces the agent's policy and limits.",
-     "inputSchema": {"type": "object", "properties": {
-         **MARKET,
-         "side": {"type": "string", "enum": ["buy", "sell"]},
-         "size": {"type": "number", "description": "in the market's base asset, e.g. 0.01 ETH"},
-         "order_type": {"type": "string", "enum": ["market", "limit"], "description": "default limit"},
-         "price": {"type": "number", "description": "limit price in USD (limit orders only)"},
-         "leverage": {"type": "number", "description": "e.g. 2 for 2x (default 1)"},
-         "reduce_only": {"type": "boolean"}, "post_only": {"type": "boolean"}},
-         "required": ["side", "size"]},
-     "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
-     "handler": place_order, "write": True},
-    {"name": "cancel_order", "title": "Cancel order",
-     "description": "Cancel one of the configured owner's resting orders, as the agent. Same gate as place_order.",
-     "inputSchema": {"type": "object", "properties": {"order_id": {"type": "integer"}}, "required": ["order_id"]},
-     "annotations": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True},
-     "handler": cancel_order, "write": True},
-    # local only (they read the configured owner and agent; a read-only server lists neither)
-    {"name": "check_order", "title": "Check an order",
-     "description": "Check an order against every rule the network runs (market, size, price band, margin, the agent's "
-                    "limits) for the configured owner and agent, without signing or sending anything: whether it would be "
-                    "taken, each rule it breaks with the real numbers, and fixes that pass. Ask: \"Can I buy 0.1 ETH at 20x?\"",
-     "inputSchema": {"type": "object", "properties": {
-         **MARKET, "side": {"type": "string", "enum": ["buy", "sell"]}, "size": {"type": "number"},
-         "order_type": {"type": "string", "enum": ["market", "limit"]}, "price": {"type": "number"},
-         "leverage": {"type": "number", "description": "default: the highest the limits allow"},
-         "reduce_only": {"type": "boolean"}, "post_only": {"type": "boolean"}}, "required": ["side", "size"]},
-     "annotations": {"readOnlyHint": True, "openWorldHint": True}, "handler": check_order, "write": True},
-    {"name": "my_buying_power", "title": "My buying power",
-     "description": "Per market, the largest long and short the configured owner can open at each allowed leverage, from "
-                    "free margin and the agent's limits together. Ask: \"How much ETH can I buy?\"",
-     "inputSchema": {"type": "object", "properties": {**MARKET}},
-     "annotations": {"readOnlyHint": True, "openWorldHint": True}, "handler": my_buying_power, "write": True},
+    _t("get_order", "One order",
+       "One resting order by its id: market, side, price, size left. An order that is not resting now (it filled or "
+       "was cancelled) is reported as gone. Ask: \"What is the state of order 8840974?\"",
+       {"order_id": {"type": "integer", "description": "the chain's order id, as get_orders lists it"},
+        "address": {**ADDR, "description": "the account (default: the server's configured owner)"}}, ["order_id"], get_order),
+]
+
+# what an order says, for every tool that places one
+ORDER_PROPS = {
+    **MARKET,
+    "side": {"type": "string", "enum": ["buy", "sell"], "description": "buy opens or adds to a long, sell to a short"},
+    "size": {"type": "number", "description": "in the market's base asset, e.g. 0.01 for 0.01 ETH"},
+    "order_type": {"type": "string", "enum": ["market", "limit"], "description": "limit (default) rests at its price; market fills now"},
+    "price": {"type": "number", "description": "limit price in USD (limit orders only)"},
+    "leverage": {"type": "number", "description": "e.g. 2 for 2x (default 1)"},
+    "reduce_only": {"type": "boolean", "description": "only reduce an open position, never open or add"},
+    "post_only": {"type": "boolean", "description": "rest on the book or be refused; never take liquidity"},
+}
+SIGNED = ("Signed on this machine with the agent key (OS keychain or key file); the chain enforces the agent's policy and "
+          "limits. Refused before anything is signed while the network reports agent trading off, or after stop_all.")
+ASKED = " Every order is first confirmed by you in your AI app, unless you started the server with --orders auto."
+
+
+def _w(name, title, description, properties, required=None, handler=None):
+    schema = {"type": "object", "properties": properties}
+    if required:
+        schema["required"] = required
+    return {"name": name, "title": title, "description": description, "inputSchema": schema,
+            "outputSchema": OUTPUT[name], "annotations": {**WRITE, "title": title}, "handler": handler, "write": True}
+
+
+def _l(name, title, description, properties, required=None, handler=None):
+    """local only: reads the configured owner and agent; a read-only server lists none of these"""
+    schema = {"type": "object", "properties": properties}
+    if required:
+        schema["required"] = required
+    return {"name": name, "title": title, "description": description, "inputSchema": schema,
+            "outputSchema": OUTPUT[name], "annotations": {**LOCAL_READ, "title": title}, "handler": handler, "write": True}
+
+
+TOOLS += [
+    _l("check_order", "Check an order",
+       "Check an order against every rule the network runs (market, size, price band, margin, the agent's limits) for "
+       "the configured owner and agent, without signing or sending anything: whether it would be taken, each rule it "
+       "breaks with the real numbers, and fixes that pass. Ask: \"Can I buy 0.1 ETH at 20x?\"",
+       {**ORDER_PROPS, "leverage": {"type": "number", "description": "default: the highest the limits allow"}},
+       ["side", "size"], check_order),
+    _l("my_buying_power", "My buying power",
+       "Per market, the largest long and short the configured owner can open at each allowed leverage, from free margin "
+       "and the agent's limits together. Ask: \"How much ETH can I buy?\"", {**MARKET}, None, my_buying_power),
+    _w("place_order", "Place order",
+       "Place a market or limit order as the configured agent, after checking it against every network rule (an order "
+       "the network would refuse is not signed). " + SIGNED + ASKED, ORDER_PROPS, ["side", "size"], place_order),
+    _w("close_position", "Close position",
+       "Close the owner's position in one market — all of it, or a fraction — with a reduce-only order (market by "
+       "default), with the full pre-trade check. " + SIGNED + ASKED,
+       {**MARKET, "fraction": {"type": "number", "description": "how much of the position, above 0 and at most 1 (default 1: all)",
+                               "exclusiveMinimum": 0, "maximum": 1},
+        "order_type": {"type": "string", "enum": ["market", "limit"], "description": "market (default) or limit"},
+        "price": {"type": "number", "description": "limit price in USD (limit only)"}}, None, close_position),
+    _w("set_tpsl", "Set take-profit / stop-loss",
+       "Set, move or remove the take-profit and stop-loss of the owner's position in one market. A leg you do not name "
+       "stays as it is; remove takes a leg off. A take-profit sits on the profit side of the mark, a stop-loss on the "
+       "loss side. " + SIGNED + ASKED,
+       {**MARKET, "take_profit": {"type": "number", "description": "new take-profit price in USD"},
+        "stop_loss": {"type": "number", "description": "new stop-loss price in USD"},
+        "remove": {"type": "string", "enum": ["take_profit", "stop_loss", "both"], "description": "take a leg off"}},
+       None, set_tpsl),
+    _w("modify_order", "Modify order",
+       "Move one resting order to a new price and/or size: a signed cancel-and-replace (the new order gets a new id and "
+       "no time priority); the new order is checked against the network's rules (its margin is the chain's to judge). " + SIGNED + ASKED,
+       {"order_id": {"type": "integer", "description": "the chain's order id, as get_orders lists it"},
+        "price": {"type": "number", "description": "new limit price in USD (default: unchanged)"},
+        "size": {"type": "number", "description": "new size in the base asset (default: what is left)"}},
+       ["order_id"], modify_order),
+    _w("cancel_order", "Cancel order",
+       "Cancel one of the configured owner's resting orders, as the agent. " + SIGNED,
+       {"order_id": {"type": "integer", "description": "the chain's order id, as get_orders lists it"}}, ["order_id"],
+       cancel_order),
+    _w("cancel_all", "Cancel all orders",
+       "Cancel every resting order of the configured owner — in one market, or in all of them — as the agent. " + SIGNED,
+       {**MARKET}, None, cancel_all),
+    _w("stop_all", "Stop all (kill switch)",
+       "Stop this server from signing anything new (only cancels, until you run `vordium-mcp resume` on this machine), "
+       "then cancel every resting order. Revoking the agent itself on the chain is the owner's step in Vordex → Agents.",
+       {}, None, stop_all),
 ]
 
 

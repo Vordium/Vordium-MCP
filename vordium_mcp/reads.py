@@ -187,6 +187,53 @@ def _fee_rates(spec, specs, pairs_doc, pid):
     return num(taker), num(maker), entry
 
 
+def liq_rule(sp):
+    """The liquidation rule the network publishes in /markets/specs, each part only from the field that states it.
+    No liquidation fee when every perpetual market publishes 0 or none of them publishes the field any more (a failed
+    or empty read is never "no fee"). The book rule (book_liquidation true) brings its own fields: the partial threshold,
+    the share, the cooldown and the backstop ratio; none of them is stated without it."""
+    sp = sp if isinstance(sp, dict) else {}
+    perps = [x for x in (sp.get("pairs") or []) if isinstance(x, dict) and (x.get("pair") or {}).get("kind") != "spot"]
+    fees = [x.get("liquidation_fee_bps") for x in perps]
+    no_fee = bool(perps) and (all(f == 0 for f in fees) or all("liquidation_fee_bps" not in x for x in perps))
+    # one figure for every market only when EVERY perpetual market publishes that same figure
+    known = sorted({num(f) for f in fees}) if fees and all(num(f) is not None for f in fees) else []
+    book = sp.get("book_liquidation") is True
+    pos = lambda v: num(v) if book and num(v) is not None and num(v) > 0 else None
+    above, share, wait = (pos(sp.get("liquidation_partial_threshold_6dec")), pos(sp.get("liquidation_partial_bps")),
+                          pos(sp.get("liquidation_cooldown_ms")))
+    bn, bd = pos(sp.get("liquidation_backstop_numerator")), pos(sp.get("liquidation_backstop_denominator"))
+    rule = {"fee_pct": 0 if no_fee else (round(known[0] / 100, 2) if len(known) == 1 else None),
+            "book_liquidation": book,
+            "partial_threshold_usdc": above / 10 ** 6 if above else None,
+            "partial_pct": share / 100 if share and share <= 10000 else None,
+            "cooldown_s": wait / 1000 if wait else None,
+            "backstop_below_maintenance": f"{bn:g}/{bd:g}" if bn and bd and bn < bd else None,
+            "partial_when_enough": sp.get("isolated_partial_liquidation") is True}
+    words = ("A liquidation is closed with an order against the order book. " if book else "")
+    if no_fee:
+        words += "No liquidation fee."
+    elif rule["fee_pct"] is not None:
+        words += f"A liquidation charges {rule['fee_pct']}% of the value closed."
+    else:
+        words += "The liquidation fee is in each market's row."
+    if rule["partial_when_enough"]:
+        words += " A position is closed only in part when that is enough."
+    if rule["partial_threshold_usdc"]:
+        words += (f" A position worth more than {rule['partial_threshold_usdc']:g} USDC is closed "
+                  f"{format(rule['partial_pct'], 'g') + '%' if rule['partial_pct'] else 'part of it'} first"
+                  f"{', and in full if it is still at its liquidation level within ' + format(rule['cooldown_s'], 'g') + ' s' if rule['cooldown_s'] else ''}.")
+    if book:
+        words += " Any margin left stays with the trader."
+    if rule["backstop_below_maintenance"]:
+        words += (f" If the book has not closed a position by the time its equity falls below {rule['backstop_below_maintenance']} "
+                  "of its maintenance margin, the liquidity vault takes it over at the mark: an isolated position with its "
+                  "margin; in cross margin, every cross position with the cross margin and the account's free USDC (its "
+                  "open orders in those markets are cancelled first). Nothing is returned; the vault keeps any profit.")
+    rule["summary"] = words
+    return rule
+
+
 def get_fees(chain, cfg, params):
     _identity(chain)
     spr, msr, pr = chain.spec(), chain.market_specs(), chain.markets()
@@ -198,6 +245,7 @@ def get_fees(chain, cfg, params):
         want = _pair(chain, params).get("pair_id")
     mspec = {m.get("id"): m for m in spec.get("markets") or []} if isinstance(spec.get("markets"), list) else {}
     rows = []
+    lrule = liq_rule(specs.get("specs") or {})
     for p in pairs_doc.get("pairs") or []:
         pid = p.get("pair_id")
         if want is not None and pid != want:
@@ -209,6 +257,8 @@ def get_fees(chain, cfg, params):
             or num(p.get("max_leverage_x"))
         mm = num(e.get("maintenance_margin_bps") if e else p.get("maintenance_margin_bps"))
         lf = num(e.get("liquidation_fee_bps"))
+        if lf is None and lrule["fee_pct"] == 0:
+            lf = 0          # the network no longer publishes a liquidation fee: none
         rows.append({"market": p.get("symbol"), "pair_id": pid, "state": p.get("lifecycle_state"),
                      "taker_fee_pct": round(taker / 100, 4) if taker is not None else None,
                      "maker_fee_pct": round(maker / 100, 4) if maker is not None else None,
@@ -223,20 +273,21 @@ def get_fees(chain, cfg, params):
     out = {"network": chain.network, "count": len(rows), "markets": rows,
            "withdrawal_fee_usdc": scaled(((specs.get("specs") or {}).get("withdrawal_fee_6dec")), 10 ** 6),
            "funding_interval_secs": (specs.get("specs") or {}).get("funding_interval_secs"),
-           "units": "fees, margins and the liquidation fee in percent of notional; a negative maker fee is a rebate; "
+           "liquidation": lrule,
+           "units": "fees, margins and the liquidation fee in percent of notional (0 = no liquidation fee); a negative maker fee is a rebate; "
                     "initial margin is 1 / maximum leverage; — or null means the network publishes no value",
            "read_at": msr.get("read_at"), "source": source(spr, msr, pr)}
     if len(rows) == 1:
         r = rows[0]
         out["summary"] = (f"{r['market']}: taker {r['taker_fee_pct']}%, maker {r['maker_fee_pct']}%, up to "
-                          f"{r['max_leverage_x']}x, maintenance margin {r['maintenance_margin_pct']}%, liquidation fee "
-                          f"{r['liquidation_fee_pct']}%.")
+                          f"{r['max_leverage_x']}x, maintenance margin {r['maintenance_margin_pct']}%, "
+                          + ("no liquidation fee." if r['liquidation_fee_pct'] == 0 else f"liquidation fee {r['liquidation_fee_pct']}%."))
     else:
         takers = sorted({r["taker_fee_pct"] for r in rows if r["taker_fee_pct"] is not None})
         levs = [r["max_leverage_x"] for r in rows if r["max_leverage_x"]]
         out["summary"] = (f"{len(rows)} markets on the {chain.network}: taker fee "
                           f"{'/'.join(str(t) for t in takers) or '—'}%, leverage up to {max(levs) if levs else '—'}x. "
-                          "Each market's row has its maker fee, margins and liquidation fee.")
+                          "Each market's row has its maker fee and margins. " + lrule["summary"])
     return out
 
 
@@ -319,6 +370,14 @@ def funding_history(chain, pair, n):
 
 
 # ── accounts ─────────────────────────────────────────────────────────────────
+def liq_distance(mark, liq, is_long):
+    """how far the mark can still move AGAINST the position before its liquidation price, in % of the mark: a long is
+    liquidated below, a short above. 0 or less: the mark is at or past it. None when either price is unknown."""
+    if not mark or not liq:
+        return None
+    return ((mark - liq) if is_long else (liq - mark)) / mark * 100
+
+
 def get_account(chain, cfg, params):
     _identity(chain)
     a = _address(params)
@@ -335,18 +394,33 @@ def get_account(chain, cfg, params):
         od = o["json"]
         for row in (od.get("prices") if isinstance(od, dict) else od) or []:
             marks[row.get("pair_id")] = num(row.get("mark_price"))
+    # cross positions: their liquidation price is the ACCOUNT's (GET /account/cross), not the per-position one; until the
+    # network publishes it a cross position's liquidation price and distance are unknown ("—"), never a wrong number
+    # 404 = the network has no cross margin (every position isolated); any other failed read = the mode is unknown, so
+    # no position gets a liquidation price it might not have
+    mstate, ms = chain.margin_modes(a)
     positions = []
     for p in plist:
         size = scaled(p.get("size"), 10 ** 18)
         entry = scaled(p.get("entry_price"), 10 ** 6)
         upnl = scaled(p.get("unrealized_pnl"), 10 ** 6)
-        liq = scaled(p.get("liquidation_price"), 10 ** 6)
+        c = ms["cross"].get(p.get("id")) if ms else None
+        mode = ("isolated" if mstate == "none" else "unknown" if mstate == "unknown"
+                else "cross" if c is not None else ms["modes"].get(p.get("pair_id"), ms["default"]))
+        if mode == "cross":
+            est = (c or {}).get("liquidation_price_estimate_8dec")
+            liq = scaled(est, 10 ** 8) if est is not None else None
+        elif mode == "isolated":
+            liq = scaled(p.get("liquidation_price"), 10 ** 6)
+        else:
+            liq = None
         mark = marks.get(p.get("pair_id"))
-        dist = abs(mark - liq) / mark * 100 if mark and liq else None
+        dist = liq_distance(mark, liq, bool(p.get("is_long")))
         positions.append({"market": (pairs.get(p.get("pair_id")) or {}).get("symbol"), "pair_id": p.get("pair_id"),
                           "side": "long" if p.get("is_long") else "short", "size": size, "entry_price": entry,
                           "mark_price": mark, "unrealized_pnl_usd": upnl, "margin_usd": scaled(p.get("margin"), 10 ** 6),
-                          "leverage": p.get("leverage"), "liquidation_price": liq or None,
+                          "leverage": p.get("leverage"), "margin_mode": mode,
+                          "liquidation_price": liq or None,
                           "distance_to_liquidation_pct": round(dist, 2) if dist is not None else None})
     orders = [{"order_id": x.get("id"), "market": (pairs.get(x.get("pair_id")) or {}).get("symbol"),
                "side": x.get("side"), "type": x.get("order_type"), "price": scaled(x.get("price"), 10 ** 6),
@@ -358,16 +432,21 @@ def get_account(chain, cfg, params):
     out = {"network": chain.network, "address": a, "usdc": bal, "positions": positions, "orders": orders,
            "explorer": explorer_link(chain, "address", a),
            "units": "USD / USDC; sizes in each market's base asset; distance_to_liquidation_pct is how far the mark "
-                    "price is from the liquidation price; realized PnL per trade is in get_fills",
+                    "can still move against the position before its liquidation price, as a percent of the mark (0 or "
+                    "less: the mark is at or past it); null when unknown (a cross position until the network publishes "
+                    "the account's liquidation price); realized PnL per trade is in get_fills",
            "source": source(eq, pos, ords, o)}
     risk = min((p for p in positions if p["distance_to_liquidation_pct"] is not None),
                key=lambda p: p["distance_to_liquidation_pct"], default=None)
     s = (f"{short(a)}: account value {usd(bal['account_value'])}, {usd(bal['available_to_trade'])} available, "
          f"{len(positions)} position{'s' if len(positions) != 1 else ''}, {len(orders)} open order"
          f"{'s' if len(orders) != 1 else ''}, unrealized PnL {usd(bal['unrealized_pnl'])}.")
-    if risk:
-        s += (f" Closest to liquidation: {risk['market']} {risk['side']} at {usd(risk['liquidation_price'])}, "
-              f"{risk['distance_to_liquidation_pct']}% from the mark.")
+    if risk and risk["distance_to_liquidation_pct"] <= 0:
+        s += (f" {risk['market']} {risk['side']}: the mark is at or past its liquidation price "
+              f"{usd(risk['liquidation_price'])}.")
+    elif risk:
+        s += (f" Closest to liquidation: {risk['market']} {risk['side']} at {usd(risk['liquidation_price'])}; the mark can "
+              f"move {risk['distance_to_liquidation_pct']}% against it first.")
     out["summary"] = s
     return out
 

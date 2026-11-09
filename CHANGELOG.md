@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.6.0
+- Every order asks you first: before `place_order`, `close_position`, `modify_order` or `set_tpsl` signs, your AI app
+  shows the order and nothing is signed unless you confirm (MCP elicitation). `--orders auto` lets orders within the
+  agent's on-chain limits go through without asking — your choice, never the default. An app that cannot ask is refused,
+  with the reason. Cancels and `stop_all` do not ask.
+- New tools: `get_order` (one order by id), `close_position` (all or part of a position, reduce-only), `cancel_all`
+  (one market or all), `modify_order` (a signed cancel-and-replace), `set_tpsl` (set, move or remove take-profit and
+  stop-loss), `stop_all` (this server stops signing anything but cancels until `vordium-mcp resume`, and every resting
+  order is cancelled). Every tool that signs passes the same gate as `place_order` (agent trading on, the agent registered
+  and live, trading open, not stopped); `close_position` runs the full pre-trade check; `modify_order` checks the new
+  order (its margin is the chain's to judge, since the old order's margin is released); `set_tpsl` checks the agent may
+  set take-profit / stop-loss and that each leg sits on the right side of the mark; `modify_order` checks the agent may
+  modify, where the chain publishes the agent's permissions.
+- The agent key can live in the OS keychain (macOS Keychain, Windows Credential Manager, Secret Service on Linux):
+  `vordium-mcp key store|status|delete`. Without `--agent-key-file` the keychain is used. A key file other users can
+  read stops the server at start whenever one is named; an encrypted keystore opens with `--agent-key-passphrase-file`.
+  A plaintext or failing keychain is never used.
+- Tool annotations: read tools read-only and idempotent; tools that sign destructive and not idempotent. Every tool
+  publishes an `outputSchema`; every result — a refusal too — carries `summary` and `network` as structured content and as text.
+- The tool list is generated from the package (`python -m vordium_mcp.toolsdoc`) and locked in `tools.lock.json`.
+- HTTP: listing tools, prompts and resources, `initialize` and `ping` do not spend a connection's request budget.
+
+What to update:
+- Use an AI app that supports MCP elicitation for orders, or add `--orders auto` to keep orders going through without
+  asking.
+- Move the key into the keychain (`vordium-mcp key store --owner 0x… --network testnet|mainnet --from-file
+  ~/.vordium/agent.key`) and drop
+  `--agent-key-file`; or `chmod 600` the key file.
+- To use `modify_order` and `set_tpsl`, allow them for the agent in Vordex → Agents → Edit.
+
 ## 0.5.0
 - Pre-trade check: before anything is signed, an order is judged against every rule the network runs on it — market
   state and order types, lot, tick, smallest order, largest order and position, price band, margin with the fee,
@@ -12,6 +42,12 @@
 - `vordium-mcp new-agent-key PATH` makes an agent key on this machine (file mode 600, never overwritten) and prints
   only its address, to register in Vordex with its limits.
 - On the test network an agent trades without a session.
+
+What to update (from 0.4):
+- Expect `place_order` to answer an order the network would refuse with the rules it breaks and fixes that pass,
+  instead of sending it.
+- `check_order` and `my_buying_power` need `--owner`.
+- On the test network, remove any session step for the agent key from your scripts.
 
 ## 0.4.1
 - First PyPI release of the 0.4 line (same features as the hosted 0.4.0).

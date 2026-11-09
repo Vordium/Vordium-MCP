@@ -1,0 +1,19 @@
+# Smithery: run vordium-mcp locally over stdio (reads; trading needs your own agent key on your machine — see the README)
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      network:
+        type: string
+        enum: [testnet, mainnet]
+        default: testnet
+        description: Which Vordium network to read
+      owner:
+        type: string
+        pattern: "^0x[0-9a-fA-F]{40}$"
+        description: Your account address (for account tools)
+  commandFunction: |-
+    (config) => ({ command: 'uvx', args: ['vordium-mcp', '--network', config.network || 'testnet'].concat(config.owner ? ['--owner', config.owner] : []) })
+  exampleConfig:
+    network: testnet

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.vordium/vordium-mcp",
+  "description": "Vordium perps for any MCP client: markets, accounts, and orders you confirm, signed on your machine.",
+  "version": "0.6.0",
+  "websiteUrl": "https://docs.vordium.com/build/mcp/",
+  "repository": {
+    "url": "https://github.com/Vordium/vordium-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "vordium-mcp",
+      "version": "0.6.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--network",
+          "description": "testnet (default) or mainnet",
+          "default": "testnet",
+          "choices": [
+            "testnet",
+            "mainnet"
+          ]
+        },
+        {
+          "type": "named",
+          "name": "--owner",
+          "description": "your account address, for account tools and trading",
+          "isRequired": false
+        },
+        {
+          "type": "named",
+          "name": "--orders",
+          "description": "ask (default): you confirm every order; auto: orders within the agent's on-chain limits go through",
+          "default": "ask",
+          "choices": [
+            "ask",
+            "auto"
+          ]
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.vordium.com/testnet/mcp"
+    }
+  ]
+}
