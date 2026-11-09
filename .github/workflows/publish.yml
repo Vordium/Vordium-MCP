@@ -7,6 +7,8 @@
 #   workflow     = publish.yml
 #   environment  = pypi
 # Until that registration exists, the publish job fails closed.
+# After PyPI, the registry job lists server.json in the MCP Registry as io.github.Vordium/vordium-mcp: mcp-publisher
+# (pinned version, checksum checked) logs in with this workflow's GitHub OIDC token (id-token: write). No secrets.
 name: publish
 
 on:
@@ -66,3 +68,47 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  registry:
+    name: list in the MCP Registry (GitHub OIDC, no secrets)
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      MCP_PUBLISHER_VERSION: v1.8.8
+      # sha256 of mcp-publisher_linux_amd64.tar.gz as the v1.8.8 release lists it (modelcontextprotocol/registry)
+      MCP_PUBLISHER_SHA256: 09f1fa70ee146b640584274a1a6b2b8a0310b05d4321fa9224e6df6a016d67f4
+    steps:
+      - uses: actions/checkout@v4
+      - name: the listing names this release
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          ver = re.search(r'__version__ = "([^"]+)"', open("vordium_mcp/__init__.py").read()).group(1)
+          doc = json.load(open("server.json"))
+          tag = os.environ["GITHUB_REF_NAME"]
+          bad = [f for f, v in (("tag", tag), ("server.json version", "v" + doc["version"]),
+                                ("server.json package version", "v" + doc["packages"][0]["version"])) if v != "v" + ver]
+          if bad: raise SystemExit(f"::error::does not match the package version {ver}: {', '.join(bad)}; nothing is listed")
+          print(f"listing {doc['name']} {ver}")
+          PY
+      - name: wait until PyPI serves this version (the registry reads its page)
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          for i in $(seq 1 30); do
+            curl -fsS --max-time 15 "https://pypi.org/pypi/vordium-mcp/${ver}/json" > /dev/null && { echo "PyPI serves ${ver}"; sleep 30; exit 0; }
+            sleep 10
+          done
+          echo "::error::PyPI does not serve ${ver} after 5 minutes; nothing is listed"; exit 1
+      - name: mcp-publisher (pinned, checksum checked)
+        run: |
+          curl -fsSL -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar -xzf mcp-publisher.tar.gz mcp-publisher
+          ./mcp-publisher --version
+      - run: ./mcp-publisher login github-oidc
+      - name: "publish (one retry, as the registry may read PyPI a moment after this runner did)"
+        run: ./mcp-publisher publish || { sleep 60; ./mcp-publisher publish; }

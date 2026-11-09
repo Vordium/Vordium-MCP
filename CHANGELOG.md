@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.1
+- MCP Registry listing: `io.github.Vordium/vordium-mcp`, described by `server.json` on the 2025-12-11 schema and
+  published from the release workflow. The server itself is unchanged.
+
 ## 0.6.0
 - Every order asks you first: before `place_order`, `close_position`, `modify_order` or `set_tpsl` signs, your AI app
   shows the order and nothing is signed unless you confirm (MCP elicitation). `--orders auto` lets orders within the

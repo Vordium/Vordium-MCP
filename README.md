@@ -1,6 +1,6 @@
 # Vordium MCP server
 
-<!-- mcp-name: io.github.vordium/vordium-mcp -->
+<!-- mcp-name: io.github.Vordium/vordium-mcp -->
 
 Connect any AI that speaks the [Model Context Protocol](https://modelcontextprotocol.io) — Claude, ChatGPT, Cursor, or
 your own agent — to [Vordium](https://vordium.com). It can read markets, prices, order books, funding, accounts, agents,

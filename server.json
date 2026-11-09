@@ -1,8 +1,8 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
-  "name": "io.github.vordium/vordium-mcp",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Vordium/vordium-mcp",
   "description": "Vordium perps for any MCP client: markets, accounts, and orders you confirm, signed on your machine.",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "websiteUrl": "https://docs.vordium.com/build/mcp/",
   "repository": {
     "url": "https://github.com/Vordium/vordium-mcp",
@@ -13,7 +13,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "vordium-mcp",
-      "version": "0.6.0",
+      "version": "0.6.1",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
