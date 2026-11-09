@@ -112,6 +112,19 @@ def test_unknown_market_and_bad_address_refused():
     assert call(chain, cfg, "get_balance", {"address": "0x12"})[0]
 
 
+def test_a_market_tool_called_without_a_market_says_to_name_one():
+    net, cfg, chain = setup()
+    for args in ({}, {"symbol": ""}, {"symbol": "   "}, {"symbol": None}):
+        err, doc = call(chain, cfg, "get_orderbook", args)
+        assert err and doc["reason"].startswith("name a market"), (args, doc)
+        assert "None" not in doc["reason"] and "get_markets" in doc["remedy"]
+    err, doc = call(chain, cfg, "get_orderbook", {"symbol": "DOGE"})
+    assert err and doc["reason"] == "no market on this network matches 'DOGE'"
+    err, doc = call(chain, cfg, "get_orderbook", {"pair_id": 0})
+    assert err and doc["reason"] == "no market on this network matches 0"
+    assert tools._pair(chain, {}, required=False) is None and tools._pair(chain, {"symbol": " "}, required=False) is None
+
+
 def test_unreadable_network_is_said_never_filled_in():
     n = NETWORKS["testnet"]
     net, cfg, chain = setup(**{n["rest"] + "/oracle/prices": (502, "bad gateway")})

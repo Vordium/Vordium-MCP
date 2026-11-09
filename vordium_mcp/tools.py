@@ -81,7 +81,18 @@ def _units(v, scale):
         return None
 
 
+def _asked(params):
+    """The market the caller named, as they gave it: the pair_id when one was given (0 included), else the symbol."""
+    return params.get("pair_id") if params.get("pair_id") is not None else params.get("symbol")
+
+
 def _pair(chain, params, required=True):
+    named = params.get("pair_id") is not None or str(params.get("symbol") or "").strip() != ""
+    if not named:
+        if required:
+            raise Refusal("name a market: give its symbol (for example \"BTC\") or its pair_id",
+                          remedy="Call get_markets to see every market's symbol and pair_id on this network.")
+        return None
     if params.get("pair_id") is not None:
         try:
             p = chain.pair_by_id(int(params.get("pair_id")))
@@ -90,7 +101,7 @@ def _pair(chain, params, required=True):
     else:
         p = chain.pair_by_symbol(params.get("symbol"))
     if p is None and required:
-        raise Refusal(f"no market on this network matches {params.get('symbol') or params.get('pair_id')!r}",
+        raise Refusal(f"no market on this network matches {_asked(params)!r}",
                       remedy="Call get_markets: the list is read from the network and changes with it.")
     return p
 
@@ -900,7 +911,8 @@ def cancel_all(chain, cfg, params):
     """Every open order of the owner (one market, or all of them), as the agent."""
     pair = _pair(chain, params, required=False) if (params.get("symbol") or params.get("pair_id")) else None
     if (params.get("symbol") or params.get("pair_id")) and pair is None:
-        raise Refusal("cancel_all: no market on this network matches that symbol or pair_id")
+        raise Refusal(f"cancel_all: no market on this network matches {_asked(params)!r}",
+                      remedy="Call get_markets for the symbols and pair_ids, or leave both out to cancel in every market.")
     ms = chain.market_specs()
     one_shot = ms.ok and isinstance(ms["json"], dict) and (ms["json"].get("specs") or {}).get("mm_release_active") is True
 

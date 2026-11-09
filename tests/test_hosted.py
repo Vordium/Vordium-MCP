@@ -587,3 +587,34 @@ def test_listing_what_the_server_offers_costs_no_connection_budget(server):
     for i in range(15):                                   # 60 listing calls on one connection: its own bucket holds 20
         for m in ("tools/list", "prompts/list", "resources/list", "ping"):
             assert req(url + "/mcp", {"jsonrpc": "2.0", "id": i, "method": m}, sid)[0] == 200, (i, m)
+
+
+def test_result_cache_reputs_an_expired_key():
+    """An expired answer asked for again is stored again, and the byte
+    count matches what is held."""
+    from vordium_mcp.server import ResultCache
+    now = [0.0]
+    c = ResultCache(max_bytes=1000, clock=lambda: now[0])
+    c.put("k", 1, "aaaa")
+    c.put("other", 1, "bb")
+    now[0] = 5.0                       # both expired
+    c.put("k", 1, "cccccc")            # the expired key is stored again
+    assert c.get("k") == "cccccc" and c.get("other") is None
+    assert c.bytes == sum(len(v[1]) for v in c.items.values()) == 6
+    c.put("k", 1, "dd")                # live key replaced
+    assert c.get("k") == "dd" and c.bytes == 2
+
+
+def test_a_failing_answer_cache_still_answers(server, monkeypatch):
+    """The cache only saves work: if storing an answer fails, the caller still gets it, and the failure is counted."""
+    import vordium_mcp.server as srvmod
+    url, clock, net = server
+
+    def broken(self, key, ttl, text):
+        raise KeyError("cache")
+    monkeypatch.setattr(srvmod.ResultCache, "put", broken)
+    body = {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "get_status", "arguments": {}}}
+    s, _, b = req(url + "/mcp", body)
+    doc = json.loads(b)
+    assert s == 200 and doc["id"] == 7 and doc["result"]["isError"] is False
+    assert json.loads(req(url + "/health")[2])["counters"]["cache_errors"] == 1

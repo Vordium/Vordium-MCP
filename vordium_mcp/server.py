@@ -83,7 +83,8 @@ class ResultCache:
     def put(self, key, ttl, text):
         now = self.clock()
         with self.lock:
-            for k in [k for k, v in self.items.items() if v[0] <= now] + ([key] if key in self.items else []):
+            # each key once: the expired ones and this key's old answer (a key may be both)
+            for k in {k for k, v in self.items.items() if v[0] <= now} | ({key} if key in self.items else set()):
                 self.bytes -= len(self.items.pop(k)[1])
             if len(text) > self.max // 8:
                 return
@@ -100,7 +101,7 @@ class Stats:
     def __init__(self, clock=time.time):
         self.started, self.clock, self.lock = clock(), clock, threading.Lock()
         self.calls, self.methods = {}, {}
-        self.refused = self.rate_limited = self.errors = 0
+        self.refused = self.rate_limited = self.errors = self.cache_errors = 0
 
     def method(self, name):
         with self.lock:
@@ -120,7 +121,8 @@ class Stats:
         with self.lock:
             return {"uptime_s": int(self.clock() - self.started), "tool_calls": dict(sorted(self.calls.items())),
                     "methods": dict(sorted(self.methods.items())), "refused": self.refused,
-                    "rate_limited": self.rate_limited, "errors": self.errors}
+                    "rate_limited": self.rate_limited, "errors": self.errors,
+                    "cache_errors": self.cache_errors}
 
 
 class Session:
@@ -508,7 +510,10 @@ def make_http_handler(cfg, chain, limiter, stats=None, address_limiter=None, res
             key = self._result_key(message)
             if key and "result" in response and response["result"].get("isError") is False:   # a refusal is never shared
                 text = json.dumps(response["result"], default=str)
-                results.put(key[1], RESULT_TTL[key[0]], text)
+                try:
+                    results.put(key[1], RESULT_TTL[key[0]], text)
+                except Exception:          # the cache only saves work: its failure never costs the caller the answer
+                    stats.bump("cache_errors")
                 return self._send(200, headers=headers, raw=self._wrap(message.get("id"), text))
             return self._send(200, response, headers)
 

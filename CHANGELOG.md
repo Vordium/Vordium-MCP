@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.2
+- A market tool called without a market now says so ("name a market: give its symbol … or its pair_id") and points to
+  `get_markets`, instead of reporting that no market matches.
+- Hosted server: a reply is never lost when the answer cache fails, and an expired cached answer can be stored again.
+
 ## 0.6.1
 - MCP Registry listing: `io.github.Vordium/vordium-mcp`, described by `server.json` on the 2025-12-11 schema and
   published from the release workflow. The server itself is unchanged.
