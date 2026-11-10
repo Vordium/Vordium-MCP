@@ -1,6 +1,6 @@
 {
  "package": "vordium-mcp",
- "version": "0.6.2",
+ "version": "0.6.3",
  "tools": [
   {
    "name": "get_status",
@@ -84,7 +84,7 @@
   {
    "name": "get_network",
    "title": "Network identity",
-   "description": "Which Vordium network this server reads, checked against the network itself, and the facts it vouches for (chain id, genesis, finalized block, agent trading on or off). Ask: \"Which network am I connected to?\"",
+   "description": "Which Vordium network this server reads, checked against the network itself, and the facts it vouches for (chain id, genesis, finalized block, agent trading on or off), and whether it matches the chain id and genesis this release is pinned to (nothing is signed otherwise). Ask: \"Which network am I connected to?\"",
    "inputSchema": {
     "type": "object",
     "properties": {}
@@ -109,6 +109,18 @@
      "truth": {
       "type": [
        "object",
+       "null"
+      ]
+     },
+     "pinned": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "pin_warning": {
+      "type": [
+       "string",
        "null"
       ]
      }
@@ -1915,6 +1927,18 @@
        "null"
       ]
      },
+     "already_received": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "delivery_unknown": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
      "client_nonce": {
       "type": [
        "number",
@@ -2037,6 +2061,18 @@
        "null"
       ]
      },
+     "already_received": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "delivery_unknown": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
      "client_nonce": {
       "type": [
        "number",
@@ -2155,6 +2191,18 @@
      "note": {
       "type": [
        "string",
+       "null"
+      ]
+     },
+     "already_received": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "delivery_unknown": {
+      "type": [
+       "boolean",
        "null"
       ]
      },
@@ -2281,6 +2329,18 @@
        "null"
       ]
      },
+     "already_received": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "delivery_unknown": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
      "replaced_order_id": {
       "type": [
        "number",
@@ -2389,6 +2449,18 @@
        "string",
        "null"
       ]
+     },
+     "already_received": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "delivery_unknown": {
+      "type": [
+       "boolean",
+       "null"
+      ]
      }
     },
     "required": [
@@ -2485,6 +2557,18 @@
      "note": {
       "type": [
        "string",
+       "null"
+      ]
+     },
+     "already_received": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "delivery_unknown": {
+      "type": [
+       "boolean",
        "null"
       ]
      },

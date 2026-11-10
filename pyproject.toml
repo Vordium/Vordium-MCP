@@ -26,7 +26,7 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-trade = ["vordium>=1.4.9", "keyring>=24"]
+trade = ["vordium>=1.4.10", "keyring>=24"]
 
 [project.urls]
 Homepage = "https://vordium.com"

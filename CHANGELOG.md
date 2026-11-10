@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.6.3
+- Each network is pinned: the testnet to chain 101102, genesis
+  `8b5d414c5cd5d18bc468b64f87ac8e2c2b5ff494c769d5e09dcf50ce75a59792`; the mainnet to chain 101101, genesis
+  `2c1c0679fa6ab8358f1d3e8d294a8d1c73ac2e2caf9079f1216abedc3d9fdf4f`.
+- Before any tool signs, the network spec, the node's `/status` and the network's own answer must report the pinned
+  chain id and genesis, and the Vordium SDK must carry the same pin (it checks `eth_chainId` and the node again).
+  Otherwise the tool is refused with the network, the expected and the reported values, and nothing is signed. Reads
+  still work; `get_network` shows `pinned` and, on a difference, `pin_warning`.
+- `--rest` (your own node) is held to the pin of the network named with `--network`.
+- A new genesis for a network takes a new release with the new pin.
+- The `trade` extra needs `vordium>=1.4.10` (the first SDK release that pins its networks); with an older SDK, nothing
+  is signed.
+- An order's client nonce (`place_order`, `close_position`, `modify_order`) comes from the Vordium SDK's nonce
+  allocator for the owner, taken when the order is signed: strictly rising across every process on this machine, never
+  back when the clock goes back, and checked against the window the network accepts (its block time when it can be
+  read). When this computer's clock is too far off, the tool is refused, says how far, and nothing is signed.
+- A write whose answer is lost is never signed again with a new nonce. An order is sent again with the same signed
+  request; it counts as received (`accepted: true`, `already_received: true`) only when the network then lists an
+  order with its client nonce and the signed market, side and size or price. Otherwise, and for writes the network
+  does not apply once per nonce (cancel-all, modify, take-profit / stop-loss), the result says it is not known whether
+  the chain received it (`accepted: null`, `delivery_unknown: true`) and nothing is sent twice: read `get_orders` first.
+- An order whose answer was lost, or answered with a refusal or a 5xx after an earlier copy may have arrived, is
+  reported the same way (`accepted: null`, `delivery_unknown: true`): it may have reached the chain, so check the open
+  orders before placing it again. It is never reported as refused.
+- A cancel whose answer was lost is read back. It is reported as done (`accepted: true`) only when the account's
+  records show the order cancelled; as filled before the cancel (`accepted: false`, check the position) when they show
+  a fill; otherwise as not known (`accepted: null`). Never as refused.
+- A write that could not reach the network on any try is refused with "nothing was sent".
+- With no readable block time, the window is checked against this computer's clock.
+- Hosted server: calls that read the network run at most 8 at once per address and 32 at once in all; past either, the
+  call is answered at once (429 or 503, a JSON-RPC error with `Retry-After`), never queued. Every client together has a
+  per-minute cap too.
+- Hosted server: one call takes at most 25 s, every read included; a call that reaches the limit is answered as a tool
+  error saying so, and its answer is never shared.
+- Hosted server: `Mcp-Session-Id` values are issued and checked by the server. A request carrying an id the server did
+  not issue is answered 404 (send `initialize` again, without one) and counts against its address.
+- Hosted server: an IPv6 client is counted by its /64, an IPv4 client by its address.
+- A recovery phrase passed to a tool is recognised word by word, and any text argument over 4096 characters is refused
+  before anything else, so a long argument is always judged at once.
+
 ## 0.6.2
 - A market tool called without a market now says so ("name a market: give its symbol … or its pair_id") and points to
   `get_markets`, instead of reporting that no market matches.

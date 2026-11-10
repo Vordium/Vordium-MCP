@@ -16,7 +16,7 @@ from vordium_mcp.config import Config  # noqa: E402
 
 KEY = "0x" + "4c" * 32
 OWNER = "0x00000000000000000000000000000000000000aa"
-GENESIS = "ab" * 32
+GENESIS = "8b5d414c5cd5d18bc468b64f87ac8e2c2b5ff494c769d5e09dcf50ce75a59792"   # the test network's pin
 CHAIN = 101102
 
 
@@ -112,7 +112,7 @@ def test_cancel_is_signed_by_the_agent_key(env):
 def test_wrong_node_is_refused_before_signing(env, monkeypatch):
     cfg, caught = env
     monkeypatch.setattr(node_domain, "node_identity", lambda url, **kw: node_domain.NodeIdentity(101101, GENESIS))
-    with pytest.raises(network.NetworkMismatch):
+    with pytest.raises(signer.NotSigned, match="testnet.*101101.*expected 101102"):
         signer.place(cfg, "https://rest.invalid", pair_id=1, side=0, size=0.01, price=2400.0, leverage=1.0,
                      order_type=1, reduce_only=False, post_only=False)
     assert caught.calls == []

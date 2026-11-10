@@ -25,12 +25,12 @@ def out(**props):
 
 
 WRITE_OUT = dict(sent=B, accepted=B, agent=S, chain_status=N, chain_answer={}, confirmation=O,
-                 refused=B, refusal_reason=S, refusal_meaning=S, note=S)
+                 refused=B, refusal_reason=S, refusal_meaning=S, note=S, already_received=B, delivery_unknown=B)
 
 OUTPUT = {
     "get_status": out(live=B, height=N, finalized_height=N, blocks_per_second=N, trading_open=B, deposits_open=B,
                       agent_trading_on=B, trading_blockers=A),
-    "get_network": out(identity=O, truth=O),
+    "get_network": out(identity=O, truth=O, pinned=O, pin_warning=S),
     "get_markets": out(count=N, markets=A),
     "get_fees": out(count=N, markets=A, liquidation=O),
     "get_oracle": out(prices=A),

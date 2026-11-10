@@ -78,12 +78,19 @@ class Chain:
             if keep > 0 and rec is None:
                 self._inflight[url] = mine = {"ev": threading.Event(), "read": None, "error": None}
         if rec is not None:                     # the same read is already on its way: take its answer, whatever its age
-            if rec["ev"].wait(15):
+            from .limits import TimeBudgetSpent, spent_here, wait_left
+            wait = wait_left(15)                # never past this call's own time limit
+            if wait <= 0.05:
+                raise spent_here()
+            if rec["ev"].wait(wait):
                 if rec["read"] is not None:
                     return rec["read"]
-                if rec["error"] is not None:
+                # the other call ran out of ITS time: that is not this call's answer — read it here, within our own limit
+                if rec["error"] is not None and not isinstance(rec["error"], TimeBudgetSpent):
                     raise rec["error"]
-            return self._fetch_now(url, keep)   # it took too long: read it here
+            if wait_left(15) <= 0.05:
+                raise spent_here()
+            return self._fetch_now(url, keep)   # it took too long, or ran out of its own time: read it here
         if keep <= 0:
             return self._fetch_now(url, keep)
         try:

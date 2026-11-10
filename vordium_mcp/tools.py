@@ -11,7 +11,7 @@ Rules this file enforces:
 The limits an agent trades under are enforced by the chain, on every validator. This server only refuses early.
 """
 import math, threading
-from . import keys, pretrade
+from . import keys, networks, pretrade
 import time
 import re
 
@@ -24,7 +24,9 @@ from .reads import NotServed, short, usd, amount
 ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 KEYISH_FIELD = re.compile(r"priv|secret|mnemonic|seed|passphrase|keystore|password|key_?file", re.I)
 KEYISH_VALUE = re.compile(r"^(0x)?[0-9a-fA-F]{64}$")
-MNEMONIC = re.compile(r"^(\s*[a-z]{3,8}){12,24}\s*$", re.I)
+MNEMONIC_WORD = re.compile(r"[a-z]{3,8}", re.I)   # one word of a recovery phrase, checked word by word (no backtracking)
+MNEMONIC_COUNTS = (12, 15, 18, 21, 24)
+MAX_TEXT = 4096       # no tool argument is longer; a longer string is refused before any other check
 
 PRICE_6DEC = 10 ** 6       # the order book and the oracle detail route carry prices as 6-decimal integers
 SIZE_18DEC = 10 ** 18      # sizes are 18-decimal integers
@@ -54,8 +56,12 @@ def reject_key_material(params, hashes=()):
         elif isinstance(node, str):
             if path in tuple(f"$.{h}" for h in hashes):
                 return
+            if len(node) > MAX_TEXT:
+                raise Refusal(f"{path} is longer than {MAX_TEXT} characters; no tool takes text that long",
+                              remedy="Send a shorter value.")
             words = node.split()
-            if (MNEMONIC.match(node) and len(words) in (12, 15, 18, 21, 24)) or KEYISH_VALUE.match(node.strip()):
+            phrase = len(words) in MNEMONIC_COUNTS and all(MNEMONIC_WORD.fullmatch(w) for w in words)
+            if phrase or KEYISH_VALUE.match(node.strip()):
                 raise Refusal(f"{path} looks like a private key or recovery phrase; this server never takes one "
                               "through a tool",
                               remedy="Keys stay on your machine and are never passed to a tool. The value was not "
@@ -112,7 +118,10 @@ IDENTITY_TTL = 60.0
 
 def network_identity(chain, force=False):
     """Check that the network read is the one this server was started for, from three sources: the published spec,
-    the network's own answer and the node's status. Any disagreement refuses every tool."""
+    the network's own answer and the node's status. Any disagreement between them refuses every tool.
+
+    The reports are also held to the network's pin (networks.PINS). A difference does not stop reads: the identity
+    carries it as ``pin_problem`` (get_network shows it), and every write is refused (see require_pin)."""
     now = chain.clock()
     cached = getattr(chain, "_identity", None)
     if cached and not force and now - cached["at"] < IDENTITY_TTL:
@@ -130,8 +139,9 @@ def network_identity(chain, force=False):
         ids["truth"] = truth.get("chain_id")
     if len({v for v in ids.values()}) != 1:
         problems.append(f"chain ids disagree: {ids}")
-    gens = {k: v for k, v in (("spec", spec.get("genesisSha256")), ("truth", truth.get("genesis_sha256"))) if v}
-    if len(set(gens.values())) > 1:
+    gens = {k: v for k, v in (("spec", spec.get("genesisSha256")), ("truth", truth.get("genesis_sha256")),
+                              ("status", status.get("genesis_sha256"))) if v}
+    if len({str(v).lower().removeprefix("0x") for v in gens.values()}) > 1:
         problems.append(f"genesis disagrees: {gens}")
     if truth.get("network") and truth.get("network") != chain.network:
         problems.append(f"the network's own answer names {truth.get('network')!r}")
@@ -140,10 +150,27 @@ def network_identity(chain, force=False):
                       + "; ".join(problems),
                       readings={"source": source(sp, tr, st)},
                       remedy="Check --network and any custom address (--rest, --spec, --truth).")
+    names = {"spec": "the network spec", "status": "the node's /status", "truth": "the network's own answer"}
+    pin_lines = networks.pin_problems(chain.network, {names[k]: v for k, v in ids.items()},
+                                      {names[k]: v for k, v in gens.items()})
+    if not gens:
+        pin_lines.append(f"no source reports the genesis, expected {networks.pin(chain.network)['genesis_sha256']}")
     value = {"network": chain.network, "chain_id": ids["spec"], "genesis_sha256": gens.get("spec") or gens.get("truth"),
-             "testnet": want_test}
+             "testnet": want_test, "pin": networks.pin(chain.network),
+             "pin_problem": networks.pin_refusal(chain.network, pin_lines) if pin_lines else None}
     chain._identity = {"at": now, "value": value}
     return value
+
+
+def require_pin(chain, force=False):
+    """Refuse (nothing signed) unless what the network reports equals its pin. Returns the pin."""
+    ident = network_identity(chain, force=force)
+    if ident.get("pin_problem"):
+        raise Refusal(ident["pin_problem"], readings={"pin": ident["pin"], "reported": {
+                          "chain_id": ident["chain_id"], "genesis_sha256": ident["genesis_sha256"]}},
+                      remedy="Check --network and any custom address (--rest). This release signs only for the "
+                             "network its pin names; a new genesis needs a new release.")
+    return ident["pin"]
 
 
 def read_switch(chain):
@@ -170,17 +197,20 @@ def get_network(chain, cfg, params):
     r = chain.truth(cache=False)
     doc = r["json"] if r.ok and isinstance(r["json"], dict) else None
     out = {"network": chain.network, "identity": ident, "testnet_tokens_have_no_value": chain.network == "testnet",
+           "pinned": {**ident["pin"], "matches": ident["pin_problem"] is None},
            "trading_from_this_server": "off" if cfg.read_only else ("allowed by the operator" if cfg.allow_trading
                                                                      else "not allowed by the operator"),
            "source": source(r)}
+    if ident["pin_problem"]:
+        out["pin_warning"] = ident["pin_problem"] + " Reads still work; no write tool signs until this matches."
     if doc is None or doc.get("version") != 1:
         out["truth"] = {"established": False, "why": f"the network's answer could not be read ({r['status']})"}
         out["summary"] = f"Connected to the {chain.network}; its own answer could not be read ({r['status']})."
-        return out
+        return _pin_summary(out)
     if doc.get("ok") is not True:
         out["truth"] = {"established": False, "why": str(doc.get("error") or "not ok"), "stale": doc.get("stale")}
         out["summary"] = f"Connected to the {chain.network}; the network cannot vouch for its state right now."
-        return out
+        return _pin_summary(out)
     committed = doc.get("committed") or {}
     out["truth"] = {
         "established": True,
@@ -204,6 +234,13 @@ def get_network(chain, cfg, params):
                       f"validators; trading {({True: 'open', False: 'closed'}).get(t['trading_open'], 'unknown')}, agent trading "
                       f"{({True: 'on', False: 'off'}).get(t['agent_policy_active'], 'unknown')}." if isinstance(t.get("finalized_height"), int)
                       else f"Connected to the {chain.network}.")
+    return _pin_summary(out)
+
+
+def _pin_summary(out):
+    if out.get("pin_warning"):
+        out["summary"] = ("Warning: the network does not match this release's pin, so nothing will be signed. "
+                          + out["summary"])
     return out
 
 
@@ -580,6 +617,7 @@ def _confirm(cfg, kind, summary, details):
 
 def _write(chain, cfg, kind, params, do, precheck=None, describe=None):
     network_identity(chain)
+    require_pin(chain)
     if cfg.read_only:
         raise Refusal(f"{kind} is not available on a read-only server")
     held = stopped(cfg)
@@ -609,22 +647,76 @@ def _write(chain, cfg, kind, params, do, precheck=None, describe=None):
     if held is not None and kind not in WHILE_STOPPED:
         raise Refusal(f"{kind} refused: this server was stopped with stop_all ({held.get('at')}) while the order waited",
                       remedy=f"Run `{_resume_hint(cfg)}` to allow trading again. Nothing was signed or sent.")
+    require_pin(chain, force=True)                     # read again after the user decided: still the pinned network
     try:
         answer = do(signer, agent, pair)
     except Refusal:
         raise
+    except networks.NotSigned as e:                     # refused before any signature was made
+        raise Refusal(f"{kind} refused: {e}", remedy="Nothing was signed or sent.")
     except Exception as e:
+        if type(e).__name__ == "DeliveryUnknown" and getattr(e, "never_sent", False):   # no copy left this machine
+            raise Refusal(f"{kind}: the network could not be reached, so nothing was sent", remedy="Try again when the network answers.")
+        if type(e).__name__ == "DeliveryUnknown":       # the SDK sent it and no answer came back: neither accepted nor refused
+            answer = {"status": "unknown", "delivery_unknown": True, "detail": str(e)[:300],
+                      "nonce": getattr(e, "nonce", None), "attempts": getattr(e, "attempts", None)}
+            return _unknown(chain, kind, agent, asked, answer)
         raise Refusal(f"{kind}: it failed while signing or sending ({type(e).__name__}: {str(e)[:200]}); it may have reached "
                       "the chain", remedy="Read get_orders and get_positions before trying again.",
                       note="It may have been signed and sent: check before trying again.")
     code = answer.get("status_code") if isinstance(answer, dict) else None
-    return {"summary": f"{kind}: " + ("received by the chain." if isinstance(code, int) and 200 <= code < 300 else
+    # a copy of the same signed request was sent again after a lost answer, and the chain said its nonce was used: the
+    # first copy arrived, and nothing was sent twice
+    received = isinstance(answer, dict) and answer.get("already_received") is True
+    # the answer was lost, and it is not known whether the chain has it: never "accepted", never "refused"
+    unknown = isinstance(answer, dict) and not received and (answer.get("status") == "unknown" or answer.get("unknown") is True
+                                                               or answer.get("delivery_unknown") is True)
+    if unknown:
+        return _unknown(chain, kind, agent, asked, answer)
+    if isinstance(answer, dict) and answer.get("status") == "not_sent":
+        raise Refusal(f"{kind}: the network could not be reached, so nothing was sent", remedy="Try again when the network answers.")
+    if isinstance(answer, dict) and answer.get("status") == "filled":     # a cancel that came after the order filled
+        return {"summary": f"{kind}: the order filled before the cancel; check your position.", "network": chain.network,
+                "sent": True, "agent": agent, "confirmation": asked, "chain_status": None, "chain_answer": answer,
+                "accepted": False, "already_received": False,
+                "note": "The order is no longer on the book because it filled: read get_positions."}
+    return {"summary": f"{kind}: " + ("received by the chain (an earlier copy of the same signed request arrived; it was "
+                                      "not made twice)." if received else
+                                      "received by the chain." if isinstance(code, int) and 200 <= code < 300 else
                                       f"the chain answered {code}."),
             "network": chain.network, "sent": True, "agent": agent, "confirmation": asked, "chain_status": code, "chain_answer": answer,
-            "accepted": isinstance(code, int) and 200 <= code < 300,
+            "accepted": received or (isinstance(code, int) and 200 <= code < 300), "already_received": received,
             "note": "This is the chain's own answer, unchanged. Accepted means received, not filled: read "
                     "get_orders and get_positions to see what the chain applied. The chain enforces the agent's "
                     "policy and market limits; it may still drop an order this server let through."}
+
+
+def _unknown(chain, kind, agent, asked, answer):
+    """A write that was sent and whose answer was lost: it may have reached the chain. Never accepted, never refused."""
+    return {"summary": f"{kind}: not known whether the chain received it - it may have reached the chain (the answer "
+                       "was lost); it was not sent twice. Check the open orders before placing it again.",
+            "network": chain.network, "sent": True, "agent": agent, "confirmation": asked, "chain_status": None,
+            "chain_answer": answer, "accepted": None, "already_received": False, "delivery_unknown": True,
+            "note": "Read get_orders and get_positions to see what the chain applied before sending it again: a new "
+                    "attempt is a new order."}
+
+
+def client_nonce(chain, cfg, kind):
+    """The owner's next client nonce from the SDK's allocator: strictly rising across every process on this machine,
+    never back when the clock goes back, and checked against the network's window (its block time when it can be read)
+    before anything is signed."""
+    try:
+        from vordium import nonces
+    except Exception:
+        raise Refusal(f"{kind} refused: signing needs the trade extra", remedy='pip install "vordium-mcp[trade]". Nothing was signed or sent.')
+    if not hasattr(nonces, "next_nonce"):
+        raise Refusal(f"{kind} refused: the installed Vordium SDK has no nonce allocator",
+                      remedy='pip install -U "vordium-mcp[trade]". Nothing was signed or sent.')
+    clock = nonces.chain_clock_for(chain.rest, chain.network)
+    try:
+        return nonces.next_nonce(cfg.owner, nonces.ORDERS, clock() if clock is not None else None)
+    except nonces.ClockOutOfWindow as e:
+        raise Refusal(f"{kind} refused: {e}", remedy="Set this computer's clock right, then try again. Nothing was signed or sent.")
 
 
 SIDES = {"buy": 0, "long": 0, "sell": 1, "short": 1}
@@ -653,7 +745,7 @@ def _place(chain, cfg, params, kind):
     if size <= 0 or leverage < 1 or (otype == 1 and price <= 0):
         raise Refusal("size must be above 0, leverage at least 1, and a limit order needs a price above 0")
 
-    nonce = int(time.time() * 1000)                  # sent explicitly, so the chain's refusal record can be matched to it
+    nonce = []                                       # taken when the order is signed; sent explicitly, so the chain's refusal record can be matched to it
 
     def precheck(agent, pair):
         try:
@@ -671,9 +763,10 @@ def _place(chain, cfg, params, kind):
                                  + ". Nothing was signed or sent.")
 
     def do(signer, agent, pair):
+        nonce.append(client_nonce(chain, cfg, kind))
         return signer.place(cfg, chain.rest, pair_id=pair["pair_id"], side=side, size=size, price=price,
                             leverage=leverage, order_type=otype, reduce_only=bool(params.get("reduce_only", False)),
-                            post_only=bool(params.get("post_only", False)), client_nonce=nonce)
+                            post_only=bool(params.get("post_only", False)), client_nonce=nonce[0])
     def describe(pair):
         what = (f"{'Buy' if side == 0 else 'Sell'} {_num(params.get('size'))} {pair.get('name') or pair.get('symbol')} "
                 + (f"at {_num(params.get('price'))} (limit)" if otype == 1 else "at the market price")
@@ -685,7 +778,7 @@ def _place(chain, cfg, params, kind):
     out = _write(chain, cfg, kind, params, do, precheck, describe)
     if out.get("accepted"):
         try:
-            why = refusal_of(chain, out.get("agent"), nonce)
+            why = refusal_of(chain, out.get("agent"), nonce[0])
         except Exception:
             why, out["refusal_check"] = None, "the chain's refusal record could not be read; get_orders shows what it applied"
         if why is not None:
@@ -695,7 +788,7 @@ def _place(chain, cfg, params, kind):
             _add_meaning(chain, out)
     else:
         _intake_refusal(chain, out)
-    out["client_nonce"] = nonce
+    out["client_nonce"] = nonce[0] if nonce else None
     return out
 
 
@@ -964,7 +1057,7 @@ def modify_order(chain, cfg, params):
     if new_price == int(hit.get("price_8dec") or 0) and new_size == int(str(hit.get("remaining_18dec") or hit.get("size") or 0)):
         raise Refusal("modify_order: that is the order as it rests now; give a new price or size")
     side = "buy" if str(hit.get("side", "")).lower().startswith("b") else "sell"
-    nonce = int(time.time() * 1000)
+    nonce = []                                       # taken when the new order is signed
     p2 = {**params, "pair_id": hit.get("pair_id")}
 
     def precheck(agent, pair):
@@ -996,9 +1089,10 @@ def modify_order(chain, cfg, params):
         return what, {"order_id": order_id, "new_price": new_price / 1e8, "new_size": new_size / 1e18}
 
     def do(signer, agent, pair):
-        return signer.modify(cfg, chain.rest, order_id, new_price, new_size, pair["pair_id"], side, nonce)
+        nonce.append(client_nonce(chain, cfg, "modify_order"))
+        return signer.modify(cfg, chain.rest, order_id, new_price, new_size, pair["pair_id"], side, nonce[0])
     out = _write(chain, cfg, "modify_order", p2, do, precheck, describe)
-    out.update(replaced_order_id=order_id, client_nonce=nonce,
+    out.update(replaced_order_id=order_id, client_nonce=nonce[0] if nonce else None,
                note="Accepted means received: the new order has a new id (get_orders lists it).")
     return out
 
@@ -1124,7 +1218,8 @@ TOOLS = [
        "are open. Ask: \"Is Vordium up right now?\"", handler=reads.get_status),
     _t("get_network", "Network identity",
        "Which Vordium network this server reads, checked against the network itself, and the facts it vouches for "
-       "(chain id, genesis, finalized block, agent trading on or off). Ask: \"Which network am I connected to?\"",
+       "(chain id, genesis, finalized block, agent trading on or off), and whether it matches the chain id and genesis this "
+       "release is pinned to (nothing is signed otherwise). Ask: \"Which network am I connected to?\"",
        handler=get_network),
     _t("get_markets", "Markets",
        "Every market the network lists, with its state, leverage, fees and trading rules (tick, lot, minimum size). "

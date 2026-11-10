@@ -21,6 +21,10 @@ package on your own machine to trade as an agent.
   anything is signed.
 - **Nothing is remembered.** Every value is read from the network when a tool is called. The server also checks that
   the network it reads is the one it was started for, and refuses every tool if not.
+- **Each network is pinned.** This release carries the chain id and genesis of the testnet (101102) and the mainnet
+  (101101). Before anything is signed, the network spec, the node's `/status`, the network's own answer and
+  `eth_chainId` must report the pinned values; otherwise reads still work, `get_network` shows the difference, and every
+  tool that signs is refused with the network, the expected and the reported values. A new genesis needs a new release.
 
 ## Install
 
@@ -88,7 +92,7 @@ Then ask, for example: *"What does the ETH order book on Vordium look like?"* or
 | Tool | What it does | Where |
 |---|---|---|
 | `get_status` | Is the network live: block height, blocks per second, validators agreeing, and whether trading and deposits are open. | everywhere |
-| `get_network` | Which Vordium network this server reads, checked against the network itself, and the facts it vouches for (chain id, genesis, finalized block, agent trading on or off). | everywhere |
+| `get_network` | Which Vordium network this server reads, checked against the network itself, and the facts it vouches for (chain id, genesis, finalized block, agent trading on or off), and whether it matches the chain id and genesis this release is pinned to (nothing is signed otherwise). | everywhere |
 | `get_markets` | Every market the network lists, with its state, leverage, fees and trading rules (tick, lot, minimum size). | everywhere |
 | `get_fees` | Maker and taker fees, maximum leverage, initial and maintenance margin, and the liquidation terms as the network publishes them (the fee, or none), for every market or one. | everywhere |
 | `get_oracle` | Oracle and mark prices, for every market or one. | everywhere |
@@ -213,7 +217,8 @@ The main network is used only when you name it:
 ```
 
 Use `--rest` to read from your own node instead of the public one; the server
-still checks that the node serves the network you named.
+still checks that the node serves the network you named, and signs only when it reports that network's pinned chain id
+and genesis.
 
 ## Read-only over HTTP
 

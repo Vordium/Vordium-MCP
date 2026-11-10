@@ -236,6 +236,14 @@ def req(url, body=None, headers=None, method=None):
         return e.code, dict(e.headers), e.read().decode()
 
 
+def open_session(url, ip):
+    """A session id as the server issues it, at initialize."""
+    s, h, _ = req(url + "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
+                  {"CF-Connecting-IP": ip})
+    assert s == 200
+    return h["Mcp-Session-Id"]
+
+
 def test_burst_then_slow_down_per_client(server):
     url, clock, net = server
     ping = {"jsonrpc": "2.0", "id": 41, "method": "prompts/get", "params": {"name": "-"}}
@@ -269,7 +277,9 @@ def test_health_counts_calls_per_tool_and_nothing_else(server):
     req(url + "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "nope", "arguments": {}}})
     s, _, b = req(url + "/health")
     d = json.loads(b)
-    assert s == 200 and d["read_only"] and d["limits"] == {"per_minute": 60, "burst": 20, "per_address_per_minute": 1200}
+    assert s == 200 and d["read_only"] and d["limits"] == {"per_minute": 60, "burst": 20, "per_address_per_minute": 1200,
+                                                           "in_flight": 32, "in_flight_per_address": 8,
+                                                           "all_clients_per_minute": 6000, "call_time_limit_s": 25.0}
     assert d["counters"]["tool_calls"] == {"get_balance": 3, "unknown": 1}
     assert OWNER.lower() not in b.lower() and "nope" not in b
     s, _, b = req(url + "/health?deep=1")
@@ -407,7 +417,8 @@ def test_an_address_has_a_looser_cap_across_its_connections():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{srv.server_address[1]}"
     ping = {"jsonrpc": "2.0", "id": 9, "method": "ping"}
-    codes = [req(url + "/mcp", ping, {"CF-Connecting-IP": "192.0.2.9", "Mcp-Session-Id": f"{i:032x}"})[0] for i in range(7)]
+    sids = [open_session(url, f"192.0.2.{100 + i}") for i in range(7)]   # opened elsewhere: this address spends nothing
+    codes = [req(url + "/mcp", ping, {"CF-Connecting-IP": "192.0.2.9", "Mcp-Session-Id": sid})[0] for sid in sids]
     srv.shutdown(); srv.server_close()
     assert codes == [200] * 5 + [429] * 2
 
@@ -473,8 +484,9 @@ def test_a_refused_connection_does_not_spend_its_address_budget():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{srv.server_address[1]}"
     ping = {"jsonrpc": "2.0", "id": 9, "method": "prompts/get", "params": {"name": "-"}}
-    loud = [req(url + "/mcp", ping, {"CF-Connecting-IP": "192.0.2.4", "Mcp-Session-Id": "a" * 32})[0] for _ in range(10)]
-    quiet = req(url + "/mcp", ping, {"CF-Connecting-IP": "192.0.2.4", "Mcp-Session-Id": "b" * 32})[0]
+    a, b = open_session(url, "192.0.2.40"), open_session(url, "192.0.2.40")
+    loud = [req(url + "/mcp", ping, {"CF-Connecting-IP": "192.0.2.4", "Mcp-Session-Id": a})[0] for _ in range(10)]
+    quiet = req(url + "/mcp", ping, {"CF-Connecting-IP": "192.0.2.4", "Mcp-Session-Id": b})[0]
     srv.shutdown(); srv.server_close()
     assert loud == [200, 200] + [429] * 8 and quiet == 200
 

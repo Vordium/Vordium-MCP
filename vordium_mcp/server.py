@@ -3,12 +3,14 @@
 Standard library only. A tool's result is JSON text; a refusal is an MCP tool error (isError) carrying the refusal, so
 a model sees it as a failure and never as an empty success.
 """
-import hashlib, json, math, re, secrets, sys, threading, time, traceback
+import hashlib, json, math, os, socket, sys, threading, time, traceback
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import __version__
-from .chain import Chain
+from .chain import Chain, _http
+from .limits import (CandleRoute, InFlight, Limits, SessionIds, budget_fetch, budget_spent, client_key, deadline,
+                     limits_from_env)
 from .networks import NETWORKS
 from .prompts import PromptError, get_prompt, list_prompts, list_resources, read_resource
 from . import tools as _tools
@@ -102,6 +104,7 @@ class Stats:
         self.started, self.clock, self.lock = clock(), clock, threading.Lock()
         self.calls, self.methods = {}, {}
         self.refused = self.rate_limited = self.errors = self.cache_errors = 0
+        self.busy = self.unknown_session = self.time_budget = 0
 
     def method(self, name):
         with self.lock:
@@ -122,7 +125,8 @@ class Stats:
             return {"uptime_s": int(self.clock() - self.started), "tool_calls": dict(sorted(self.calls.items())),
                     "methods": dict(sorted(self.methods.items())), "refused": self.refused,
                     "rate_limited": self.rate_limited, "errors": self.errors,
-                    "cache_errors": self.cache_errors}
+                    "cache_errors": self.cache_errors, "busy": self.busy,
+                    "unknown_session": self.unknown_session, "time_budget": self.time_budget}
 
 
 class Session:
@@ -257,9 +261,16 @@ def handle(message, chain, cfg, stats=None, session=None):
     return _error(id_, -32601, f"method not found: {method}")
 
 
-def make_chain(cfg, fetch=None):
+def make_chain(cfg, fetch=None, limits=None):
+    """The network reader. Every read obeys the calling thread's time limit (limits.deadline); with
+    ``limits.candles_base`` set, candle reads take that shorter path to the same candle service, within their own budget."""
     links = {k: v for k, v in NETWORKS.get(cfg.network, {}).items() if k in ("app", "explorer", "candles")}
-    return Chain(cfg.network, cfg.rest, cfg.spec, cfg.truth, fetch=fetch, short_ttl=cfg.short_cache_s, links=links)
+    route = None
+    if limits is not None and limits.candles_base and links.get("candles"):
+        route = CandleRoute(links["candles"], limits.candles_base,
+                            RateLimit(limits.candles_per_minute, burst=limits.candles_burst, max_clients=1))
+    return Chain(cfg.network, cfg.rest, cfg.spec, cfg.truth, fetch=budget_fetch(fetch or _http, route),
+                 short_ttl=cfg.short_cache_s, links=links)
 
 
 def serve_stdio(cfg, stdin=None, stdout=None, chain=None):
@@ -352,14 +363,20 @@ class RateLimit:
 
 
 CORS_HEADERS = "Content-Type, Accept, Authorization, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID"
-SESSION = re.compile(r"^[0-9a-f]{32}$")
 ADDRESS_FACTOR = 20     # one address may carry many connections (a hosted AI client calls from a few addresses for all its users)
 
 
-def make_http_handler(cfg, chain, limiter, stats=None, address_limiter=None, results=None):
-    """``limiter`` holds each connection (its Mcp-Session-Id, given at initialize; an address when a client sends none);
-    ``address_limiter`` holds each address across all its connections, ADDRESS_FACTOR times looser."""
+def make_http_handler(cfg, chain, limiter, stats=None, address_limiter=None, results=None, limits=None, sessions=None,
+                      in_flight=None, global_limiter=None):
+    """``limiter`` holds each connection (its Mcp-Session-Id, issued at initialize; an address when a client sends none);
+    ``address_limiter`` holds each address across all its connections, ADDRESS_FACTOR times looser. An address is an
+    IPv4 address or an IPv6 /64. A call that may read the network also needs a place in ``in_flight`` (per address and
+    in all) and a token from ``global_limiter``, and runs within ``limits.call_budget_s``."""
     stats = stats or Stats()
+    limits = limits or Limits()
+    sessions = sessions or SessionIds()
+    in_flight = in_flight or InFlight(limits.in_flight, limits.in_flight_per_address)
+    global_limiter = global_limiter or RateLimit(limits.global_per_minute, burst=limits.global_burst, max_clients=1)
     any_origin = "*" in cfg.allow_origins
     if address_limiter is None:     # a public server: connections share an address; elsewhere every request is the address's
         factor = ADDRESS_FACTOR if cfg.hosted else 1
@@ -370,6 +387,7 @@ def make_http_handler(cfg, chain, limiter, stats=None, address_limiter=None, res
         server_version = "vordium-mcp"
         sys_version = ""
         protocol_version = "HTTP/1.1"
+        timeout = limits.socket_timeout_s          # a connection that sends or reads too slowly is dropped
 
         def log_message(self, fmt, *args):                      # no request log: addresses are not recorded
             return
@@ -430,13 +448,18 @@ def make_http_handler(cfg, chain, limiter, stats=None, address_limiter=None, res
                 body = {"ok": True, "name": NAME, "version": __version__, "network": cfg.network,
                         "read_only": cfg.read_only,
                         "limits": {"per_minute": limiter.per_minute, "burst": int(limiter.cap),
-                                   "per_address_per_minute": address_limiter.per_minute},
-                        "counters": {**stats.snapshot(), "network_reads": getattr(chain, "fetches", None)}}
+                                   "per_address_per_minute": address_limiter.per_minute,
+                                   "in_flight": limits.in_flight, "in_flight_per_address": limits.in_flight_per_address,
+                                   "all_clients_per_minute": global_limiter.per_minute,
+                                   "call_time_limit_s": limits.call_budget_s},
+                        "counters": {**stats.snapshot(), "network_reads": getattr(chain, "fetches", None),
+                                     "in_flight": in_flight.running()}}
                 if "deep=1" in (self.path.split("?", 1)[1] if "?" in self.path else ""):
                     t0 = time.monotonic()
                     try:
                         from .tools import network_identity
-                        network_identity(chain)
+                        with deadline(min(10.0, limits.call_budget_s)):
+                            network_identity(chain)
                         body["network_read"] = {"ok": True, "ms": int((time.monotonic() - t0) * 1000)}
                     except Exception as e:
                         body["ok"] = False
@@ -472,10 +495,20 @@ def make_http_handler(cfg, chain, limiter, stats=None, address_limiter=None, res
                 return self._send(400, _error(None, -32700, "parse error"))
             if isinstance(message, list):
                 return self._send(400, _error(None, -32600, "batches are not accepted"))
-            client = self._client()
-            sid = (self.headers.get("Mcp-Session-Id") or "").strip().lower()
-            sid = sid if cfg.hosted and SESSION.match(sid) else None     # connections are told apart on a public server only
+            client = client_key(self._client())
+            id_ = message.get("id") if isinstance(message, dict) else None
             opening = isinstance(message, dict) and message.get("method") == "initialize"
+            # connections are told apart on a public server only; initialize always gets a new id
+            sid = (self.headers.get("Mcp-Session-Id") or "").strip().lower() if cfg.hosted and not opening else ""
+            if sid and not sessions.valid(sid):
+                # an id this server did not issue has no budget of its own: it costs its address, then starts again
+                ok, wait = address_limiter.take("a:" + client)
+                if not ok:
+                    return self._slow_down(id_, address_limiter, "address", wait)
+                stats.bump("unknown_session")
+                return self._send(404, _error(id_, -32001, "Unknown session: this server did not issue that "
+                                                         "Mcp-Session-Id. Send initialize again, without one."))
+            sid = sid or None
             # listing what the server offers costs nothing per connection (only the address's budget below)
             cheap = isinstance(message, dict) and (message.get("method") in CHEAP
                                                    or str(message.get("method", "")).startswith("notifications/"))
@@ -488,7 +521,6 @@ def make_http_handler(cfg, chain, limiter, stats=None, address_limiter=None, res
                 per, n, cap = "address", address_limiter.per_minute, int(address_limiter.cap)
             if not ok:
                 stats.bump("rate_limited")
-                id_ = message.get("id") if isinstance(message, dict) else None
                 return self._send(429, _error(id_, -32029,
                                               f"Slow down: this public server answers {n} requests a minute per {per} "
                                               f"(up to {cap} at once). Try again in {wait} s, or run vordium-mcp on "
@@ -497,17 +529,35 @@ def make_http_handler(cfg, chain, limiter, stats=None, address_limiter=None, res
             shared = self._shared(message)
             if shared is not None:
                 return self._send(200, raw=shared)
+            reads = not cheap                 # a call that may read the network: a place and a token first, never a wait
+            if reads:
+                full = in_flight.enter(client)
+                if full is None:
+                    ok, wait = global_limiter.take("*")
+                    if not ok:
+                        in_flight.leave(client)
+                        full = "all"
+                if full is not None:
+                    return self._busy(id_, full, wait if full == "all" else 1)
+            spent = False
             try:
-                response = handle(message, chain, cfg, stats)
+                with deadline(limits.call_budget_s):
+                    response = handle(message, chain, cfg, stats)
+                    spent = budget_spent()
             except Exception:
                 stats.bump("errors")
-                response = _error(message.get("id") if isinstance(message, dict) else None, -32603, "internal error")
+                response = _error(id_, -32603, "internal error")
+            finally:
+                if reads:
+                    in_flight.leave(client)
+            if spent:
+                stats.bump("time_budget")
             if response is None:
                 return self._send(202)
             headers = {}
             if cfg.hosted and opening and "result" in response:
-                headers["Mcp-Session-Id"] = sid or secrets.token_hex(16)     # stateless: only its rate bucket is kept
-            key = self._result_key(message)
+                headers["Mcp-Session-Id"] = sessions.issue()      # checked on every later request; nothing kept per session
+            key = None if spent else self._result_key(message)     # an answer cut short is never shared
             if key and "result" in response and response["result"].get("isError") is False:   # a refusal is never shared
                 text = json.dumps(response["result"], default=str)
                 try:
@@ -516,6 +566,27 @@ def make_http_handler(cfg, chain, limiter, stats=None, address_limiter=None, res
                     stats.bump("cache_errors")
                 return self._send(200, headers=headers, raw=self._wrap(message.get("id"), text))
             return self._send(200, response, headers)
+
+        def _slow_down(self, id_, bucket, per, wait):
+            stats.bump("rate_limited")
+            return self._send(429, _error(id_, -32029,
+                                          f"Slow down: this public server answers {bucket.per_minute} requests a minute "
+                                          f"per {per} (up to {int(bucket.cap)} at once). Try again in {wait} s, or run "
+                                          "vordium-mcp on your own machine for unlimited reads."),
+                              {"Retry-After": str(wait)})
+
+        def _busy(self, id_, full, wait):
+            stats.bump("busy")
+            if full == "address":
+                return self._send(429, _error(id_, -32029,
+                                              f"Slow down: this public server runs up to {limits.in_flight_per_address} "
+                                              "calls at once per address. Wait for an answer before sending more, or "
+                                              "run vordium-mcp on your own machine for unlimited reads."),
+                                  {"Retry-After": "1"})
+            return self._send(503, _error(id_, -32030, "Busy: this public server is answering as many calls as it can "
+                                                       f"right now. Try again in {wait} s, or run vordium-mcp on your "
+                                                       "own machine."),
+                              {"Retry-After": str(wait)})
 
         def _result_key(self, message):
             if results is None or not isinstance(message, dict) or message.get("method") != "tools/call":
@@ -547,19 +618,63 @@ def make_http_handler(cfg, chain, limiter, stats=None, address_limiter=None, res
     return Handler
 
 
+BUSY = json.dumps(_error(None, -32030, "Busy: this public server is answering as many calls as it can right now. "
+                                        "Try again in 1 s, or run vordium-mcp on your own machine.")).encode()
+BUSY_REPLY = (b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n"
+              b"Retry-After: 1\r\nConnection: close\r\nContent-Length: " + str(len(BUSY)).encode() + b"\r\n\r\n" + BUSY)
+
+
 class _Server(ThreadingHTTPServer):
+    """One thread per connection, at most ``max_connections`` at once. Past that the accepting thread answers the
+    connection 503 (a few hundred bytes, without waiting) and closes it, so a flood cannot use up the threads the process
+    may start."""
     request_queue_size = 256            # bursts of new connections wait to be accepted instead of being refused
     daemon_threads = True
 
+    def __init__(self, address, handler, max_connections=48, stats=None):
+        self.slots, self.stats = threading.BoundedSemaphore(max_connections), stats
+        super().__init__(address, handler)
 
-def serve_http(cfg, chain=None, ready=None):
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            if self.stats:
+                self.stats.bump("busy")
+            try:
+                request.settimeout(0.01)                # never more than a moment of the accepting thread
+                try:
+                    request.recv(MAX_BODY + 8192)      # take what has arrived: closing on unread bytes resets the reply
+                except OSError:
+                    pass
+                request.sendall(BUSY_REPLY)
+                request.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release()                        # the thread never started (the process is out of threads)
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+
+def serve_http(cfg, chain=None, ready=None, env=None):
     if not cfg.read_only:
         raise RuntimeError("the HTTP server runs read-only only")
     host, port = cfg.http.rsplit(":", 1)
     host = host.strip("[]")
-    chain = chain or make_chain(cfg)
+    limits = limits_from_env(os.environ if env is None else env)
+    chain = chain or make_chain(cfg, limits=limits)
     limiter = RateLimit(cfg.rate_per_minute, burst=cfg.burst or cfg.rate_per_minute)
-    httpd = _Server((host, int(port)), make_http_handler(cfg, chain, limiter))
+    stats = Stats()
+    httpd = _Server((host, int(port)), make_http_handler(cfg, chain, limiter, stats, limits=limits),
+                    max_connections=limits.max_connections, stats=stats)
     if ready:
         ready(httpd)
     print(f"vordium-mcp {__version__}: read-only{', hosted' if cfg.hosted else ''}, {cfg.network}, "

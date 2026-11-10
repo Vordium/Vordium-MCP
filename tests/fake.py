@@ -2,14 +2,14 @@
 import json
 
 from vordium_mcp.config import Config
-from vordium_mcp.networks import NETWORKS
+from vordium_mcp.networks import NETWORKS, PINS
 from vordium_mcp.server import make_chain
 
 OWNER = "0x00000000000000000000000000000000000000aa"
 AGENT = "0x00000000000000000000000000000000000000bb"
 
 
-def truth(active=False, ok=True, network="testnet", chain_id=101102, genesis="ab" * 32):
+def truth(active=False, ok=True, network="testnet", chain_id=101102, genesis=PINS["testnet"]["genesis_sha256"]):
     if not ok:
         return {"version": 1, "ok": False, "error": "disagree"}
     return {"version": 1, "ok": True, "network": network, "chain_id": chain_id, "genesis_sha256": genesis,
@@ -25,7 +25,7 @@ class FakeNet:
         self.calls = []
         test = network == "testnet"
         cid = 101102 if test else 101101
-        g = "ab" * 32
+        g = PINS[network]["genesis_sha256"]                 # the network's pin: a matching network
         self.routes = {
             n["spec"]: {"testnet": True, "chainId": cid, "genesisSha256": g} if test else {"chainId": cid, "genesisSha256": g},
             n["truth"]: truth(active=active, network=network, chain_id=cid, genesis=g),

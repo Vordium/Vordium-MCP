@@ -272,6 +272,7 @@ def test_switch_on_but_operator_did_not_allow(stub):
 
 
 def test_switch_on_all_clear_signs_and_relays(stub):
+    pytest.importorskip("vordium")   # signing uses the SDK (the trade extra); the hosted servers never sign
     net, cfg, chain = setup(active=True)
     err, doc = call(chain, trading_cfg(cfg), "place_order", ORDER)
     assert not err and doc["accepted"] is True and doc["chain_answer"]["status"] == "submitted"
@@ -282,6 +283,7 @@ def test_switch_on_all_clear_signs_and_relays(stub):
 
 
 def test_market_order_carries_no_price(stub):
+    pytest.importorskip("vordium")   # signing uses the SDK (the trade extra); the hosted servers never sign
     net, cfg, chain = setup(active=True)
     err, doc = call(chain, trading_cfg(cfg), "place_order",
                     {"symbol": "ETH", "side": "sell", "size": 1, "order_type": "market", "price": 2500})
@@ -297,7 +299,7 @@ def _short_refusal_wait(monkeypatch):
 def test_a_refusal_the_chain_records_after_receipt_is_reported(stub, monkeypatch):
     """The intake answers 202, then the chain refuses the agent's order: the tool must say refused, with the reason."""
     import time as _t
-    monkeypatch.setattr(_t, "time", lambda: 1_792_000_000.0)
+    monkeypatch.setattr(tools, "client_nonce", lambda chain, cfg, kind: 1_792_000_000_000)   # the nonce the record names
     rest = NETWORKS["testnet"]["rest"]
     ev = {"events": [{"kind": "agent_refused", "op_kind": "PlaceOrder", "client_nonce": 1_792_000_000_000, "reason": "price_outside_band"}]}
     net, cfg, chain = setup(active=True, **{rest + f"/events/agent/{AGENT}": ev})
@@ -314,7 +316,7 @@ def test_a_refusal_the_chain_records_after_receipt_is_reported(stub, monkeypatch
 def test_refusal_reads_in_the_networks_own_words(stub, monkeypatch):
     """With the network's refusal codes published, a refused order carries the reason key AND its meaning."""
     import time as _t
-    monkeypatch.setattr(_t, "time", lambda: 1_792_000_000.0)
+    monkeypatch.setattr(tools, "client_nonce", lambda chain, cfg, kind: 1_792_000_000_000)   # the nonce the record names
     n, rest = NETWORKS["testnet"], NETWORKS["testnet"]["rest"]
     ev = {"events": [{"kind": "agent_refused", "client_nonce": 1_792_000_000_000, "reason": "price_outside_band"}]}
     codes = {"reasons": [{"key": "price_outside_band", "meaning": "The price is outside the policy's band around the oracle price."}]}
@@ -328,6 +330,7 @@ def test_refusal_reads_in_the_networks_own_words(stub, monkeypatch):
 
 def test_an_intake_refusal_is_reported_with_its_reason(stub):
     """A node that checks agent orders at intake answers 403 agent_refused: refused, with the reason and meaning."""
+    pytest.importorskip("vordium")   # signing uses the SDK (the trade extra); the hosted servers never sign
     stub.answer = {"code": "agent_refused", "reason": "registration_not_live", "meaning": "The agent's registration is revoked or expired.", "status_code": 403}
     net, cfg, chain = setup(active=True)
     err, doc = call(chain, trading_cfg(cfg), "place_order", ORDER)
@@ -335,7 +338,18 @@ def test_an_intake_refusal_is_reported_with_its_reason(stub):
     assert doc["refusal_meaning"] == "The agent's registration is revoked or expired."
 
 
+def test_signing_without_the_sdk_is_refused_and_nothing_is_sent(stub, monkeypatch):
+    """without the SDK (the trade extra) an order is refused in plain words and nothing is signed or sent"""
+    monkeypatch.setitem(sys.modules, "vordium", None)
+    monkeypatch.setitem(sys.modules, "vordium.nonces", None)
+    net, cfg, chain = setup(active=True)
+    err, doc = call(chain, trading_cfg(cfg), "place_order", ORDER)
+    assert err and "signing needs the trade extra" in doc["reason"] and 'pip install "vordium-mcp[trade]"' in doc["remedy"]
+    assert stub.sent == []
+
+
 def test_chain_refusal_is_relayed_not_success(stub):
+    pytest.importorskip("vordium")   # signing uses the SDK (the trade extra); the hosted servers never sign
     stub.answer = {"error": "insufficient margin", "status_code": 400}
     net, cfg, chain = setup(active=True)
     err, doc = call(chain, trading_cfg(cfg), "place_order", ORDER)
@@ -358,6 +372,7 @@ def test_each_blocker_refuses_before_signing(stub, over, blocker):
 
 def test_the_test_network_takes_an_agent_with_no_session(stub):
     """the test network takes an agent's own signature with no session: a missing session is no blocker there"""
+    pytest.importorskip("vordium")   # signing uses the SDK (the trade extra); the hosted servers never sign
     rest = NETWORKS["testnet"]["rest"]
     net, cfg, chain = setup(active=True, **{rest + "/session/valid?owner=%s&session_key=%s" % (OWNER, AGENT): {"valid": False, "confirmed": False}})
     err, doc = call(chain, trading_cfg(cfg), "place_order", ORDER)
@@ -588,3 +603,27 @@ def test_a_cross_position_reads_the_accounts_published_liquidation_price(stub):
     mark = btc["mark_price"]
     assert btc["distance_to_liquidation_pct"] == round((123005.08548509 - mark) / mark * 100, 2)
 
+
+
+def test_key_guard_is_fast_on_long_letter_strings():
+    """A long run of letters (or many short words) is judged in well under a second, never by backtracking. Run in a
+    child process with its own time limit, so a slow guard fails the test instead of hanging it."""
+    import subprocess
+    code = ("import time, sys\nfrom vordium_mcp import tools\n"
+            "for s in ('A' * 60 + '1', 'a' * 4000 + '!', ' '.join(['abc'] * 400) + ' 1', 'ab ' * 1300):\n"
+            "    t0 = time.monotonic()\n"
+            "    try:\n        tools.reject_key_material({'symbol': s})\n"
+            "    except tools.Refusal:\n        pass\n"
+            "    assert time.monotonic() - t0 < 0.5, len(s)\n")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run([sys.executable, "-c", code], cwd=root, timeout=20, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-500:]
+
+
+def test_key_guard_still_refuses_a_phrase_and_a_key_and_overlong_text():
+    phrase = " ".join(["abandon"] * 11 + ["about"])
+    for bad in (phrase, " ".join(["zoo"] * 24), "0x" + "ab" * 32, "x" * 5000):
+        with pytest.raises(tools.Refusal):
+            tools.reject_key_material({"symbol": bad})
+    for ok in ("ETH", "BTC-USDC", " ".join(["eth"] * 11), "0x" + "12" * 20, "show me the market"):
+        tools.reject_key_material({"symbol": ok})
