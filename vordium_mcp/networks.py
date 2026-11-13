@@ -8,6 +8,7 @@ Markets, prices, fees and limits are read from the network when a tool is called
 The test network is the default. The main network is used only when it is named explicitly
 (``--network mainnet`` or ``VORDIUM_MCP_NETWORK=mainnet``).
 """
+from .text import ident
 
 DEFAULT_NETWORK = "testnet"
 
@@ -61,10 +62,10 @@ def pin_problems(name, chain_ids, geneses):
     out = []
     for src, cid in chain_ids.items():
         if cid is not None and cid != p["chain_id"]:
-            out.append(f"{src} reports chain id {cid}, expected {p['chain_id']}")
+            out.append(f"{src} reports chain id {ident(cid)}, expected {p['chain_id']}")
     for src, g in geneses.items():
         if g is not None and _genesis(g) != p["genesis_sha256"]:
-            out.append(f"{src} reports genesis {_genesis(g) or g}, expected {p['genesis_sha256']}")
+            out.append(f"{src} reports genesis {ident(_genesis(g) or g)}, expected {p['genesis_sha256']}")
     return out
 
 

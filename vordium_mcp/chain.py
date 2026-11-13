@@ -8,12 +8,15 @@ The transport is injectable (``fetch=``), so the tests drive every branch withou
 import json, threading, time, urllib.error, urllib.request
 
 from . import __version__
+from .text import clean
 
 USER_AGENT = f"vordium-mcp/{__version__} (+https://docs.vordium.com/build/mcp/)"
 
 
 class ChainUnreachable(RuntimeError):
-    """The network could not be read. Never swallowed: a tool that cannot read says so."""
+    """The network could not be read. Never swallowed: a tool that cannot read says so. ``answer`` is the network's
+    own text, when it sent one."""
+    answer = None
 
 
 def iso(t):
@@ -226,9 +229,10 @@ class Chain:
 
     # ── helpers over those reads (still nothing typed) ───────────────────────
     def require(self, read, what):
-        if not read.ok:
-            raise ChainUnreachable(f"{what}: {read['url']} answered {read['status']}"
-                                   + (f" {read['text']}" if read.get("text") else ""))
+        if not read.ok:                 # the body is the network's text: carried as data, never in the sentence
+            e = ChainUnreachable(f"{what}: {read['url']} answered {read['status']}")
+            e.answer = clean(read["text"]) if read.get("text") else None
+            raise e
         return read["json"]
 
     def pairs(self):

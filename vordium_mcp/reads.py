@@ -8,9 +8,11 @@ import re
 import time
 
 from .chain import ChainUnreachable
+from .text import code, count, market, state, symbol, tier
 
 ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 TX_HASH = re.compile(r"^0x[0-9a-fA-F]{64}$")
+HEXISH = re.compile(r"(0x)?[0-9A-Za-z]{1,80}")          # an address, a hash or an id: what short() writes
 
 LABEL = {"testnet": "The Vordium testnet", "mainnet": "Vordium mainnet"}
 RESOLUTIONS = ("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "3D", "1W", "1M")
@@ -70,7 +72,9 @@ def pct(v, digits=4):
 
 
 def short(a):
-    a = str(a or "")
+    """an address or hash, shortened for a sentence; a value that is not one is not written there"""
+    a = str(a) if a not in (None, "") else ""
+    a = a if HEXISH.fullmatch(a) or not a else "—"
     return f"{a[:6]}…{a[-4:]}" if len(a) > 12 else a
 
 
@@ -148,7 +152,7 @@ def get_status(chain, cfg, params):
         "agent_trading_on": t.get("agent_policy_active"), "version": s.get("version"),
         "units": "height in blocks; blocks_per_second measured over the last 10 seconds",
         "source": source(st, tr)}
-    parts = [f"{LABEL[chain.network]} is {'live' if live else 'not live (' + str(s.get('sync_state')) + ')'}"]
+    parts = [f"{LABEL[chain.network]} is {'live' if live else 'not live (' + state(s.get('sync_state')) + ')'}"]
     if isinstance(s.get("chain_head"), int):
         parts.append(f"block {s['chain_head']:,}")
     if rate is not None:
@@ -279,7 +283,7 @@ def get_fees(chain, cfg, params):
            "read_at": msr.get("read_at"), "source": source(spr, msr, pr)}
     if len(rows) == 1:
         r = rows[0]
-        out["summary"] = (f"{r['market']}: taker {r['taker_fee_pct']}%, maker {r['maker_fee_pct']}%, up to "
+        out["summary"] = (f"{symbol(r['market'], 'market ' + count(r['pair_id']))}: taker {r['taker_fee_pct']}%, maker {r['maker_fee_pct']}%, up to "
                           f"{r['max_leverage_x']}x, maintenance margin {r['maintenance_margin_pct']}%, "
                           + ("no liquidation fee." if r['liquidation_fee_pct'] == 0 else f"liquidation fee {r['liquidation_fee_pct']}%."))
     else:
@@ -321,10 +325,10 @@ def get_candles(chain, cfg, params):
         hi = max((num(b["high"]) or 0) for b in bars)
         lo = min((num(b["low"]) for b in bars if num(b["low"]) is not None), default=None)
         ch = ((c - o) / o * 100) if o and c is not None else None
-        out["summary"] = (f"{pair.get('symbol')} {kind} price over {len(bars)} × {res}: {usd(o)} → {usd(c)} "
+        out["summary"] = (f"{market(pair)} {kind} price over {len(bars)} × {res}: {usd(o)} → {usd(c)} "
                           f"({pct(ch, 2)}), high {usd(hi)}, low {usd(lo)}.")
     else:
-        out["summary"] = f"{pair.get('symbol')}: the network has no {res} candles for this market yet."
+        out["summary"] = f"{market(pair)}: the network has no {res} candles for this market yet."
     return out
 
 
@@ -348,11 +352,11 @@ def get_trades(chain, cfg, params):
            "source": source(r)}
     if rows:
         vol = sum(x["value_usd"] or 0 for x in rows)
-        out["summary"] = (f"{pair.get('symbol')}: last trade {rows[0]['side']} {amount(rows[0]['size'])} at "
+        out["summary"] = (f"{market(pair)}: last trade {state(rows[0]['side'])} {amount(rows[0]['size'])} at "
                           f"{usd(rows[0]['price'])} ({rows[0]['time']}); the {len(rows)} most recent trades total "
                           f"{usd(vol, True)}.")
     else:
-        out["summary"] = f"{pair.get('symbol')}: no trades recorded on the {chain.network} yet."
+        out["summary"] = f"{market(pair)}: no trades recorded on the {chain.network} yet."
     return out
 
 
@@ -442,10 +446,10 @@ def get_account(chain, cfg, params):
          f"{len(positions)} position{'s' if len(positions) != 1 else ''}, {len(orders)} open order"
          f"{'s' if len(orders) != 1 else ''}, unrealized PnL {usd(bal['unrealized_pnl'])}.")
     if risk and risk["distance_to_liquidation_pct"] <= 0:
-        s += (f" {risk['market']} {risk['side']}: the mark is at or past its liquidation price "
+        s += (f" {symbol(risk['market'], 'market ' + count(risk['pair_id']))} {risk['side']}: the mark is at or past its liquidation price "
               f"{usd(risk['liquidation_price'])}.")
     elif risk:
-        s += (f" Closest to liquidation: {risk['market']} {risk['side']} at {usd(risk['liquidation_price'])}; the mark can "
+        s += (f" Closest to liquidation: {symbol(risk['market'], 'market ' + count(risk['pair_id']))} {risk['side']} at {usd(risk['liquidation_price'])}; the mark can "
               f"move {risk['distance_to_liquidation_pct']}% against it first.")
     out["summary"] = s
     return out
@@ -518,8 +522,9 @@ def get_agents(chain, cfg, params):
             ev = chain.read(f"/events/agent/{key}?limit=5", cache=False)
             reads.append(ev)
             if ev.ok and isinstance(ev["json"], dict):
-                row["recent_actions"] = [{k: x.get(k) for k in ("kind", "at_ms", "height", "pair_id", "reason",
-                                                                "client_nonce") if k in x}
+                row["recent_actions"] = [{("network_reason" if k == "reason" else k): x.get(k)
+                                          for k in ("kind", "at_ms", "height", "pair_id", "reason", "client_nonce")
+                                          if k in x}
                                          for x in (ev["json"].get("events") or [])[:5]]
         rows.append(row)
     lim = doc.get("agent_limit") if isinstance(doc.get("agent_limit"), dict) else None
@@ -531,9 +536,9 @@ def get_agents(chain, cfg, params):
            "source": source(*reads)}
     s = f"{short(owner)} has {len(agents)} agent{'s' if len(agents) != 1 else ''}"
     if lim and lim.get("agent_limit") is not None:
-        s += f" (limit {lim.get('agent_limit')}{', tier ' + str(lim.get('tier')) if lim.get('tier') else ''})"
+        s += f" (limit {count(lim.get('agent_limit'))}{', tier ' + tier(lim.get('tier')) if lim.get('tier') else ''})"
     if rows:
-        s += ": " + "; ".join(f"{x['name'] or short(x['agent'])} {x['status']}" for x in rows[:5])
+        s += ": " + "; ".join(f"{short(x['agent'])} {state(x['status'], 'status in its row')}" for x in rows[:5])
     out["summary"] = s + "."
     return out
 
@@ -548,7 +553,7 @@ def get_tiers(chain, cfg, params):
         if not isinstance(a.get("tier_limits"), dict):
             raise NotServed("the network does not serve agent limits by tier")
         out["agent_limits"] = {"active": a.get("active"), "per_tier": a.get("tier_limits"), "ceiling": a.get("ceiling")}
-        parts.append("agents per tier " + ", ".join(f"{k} {v}" for k, v in a["tier_limits"].items()))
+        parts.append("agents per tier " + ", ".join(f"{tier(k)} {count(v)}" for k, v in a["tier_limits"].items()))
     except NotServed as e:
         out["agent_limits"] = {"available": False, "reason": str(e)}
     try:
@@ -620,7 +625,7 @@ def get_season(chain, cfg, params):
            "all_seasons": [{"season_id": x.get("season_id"), "name": x.get("name"), "status": x.get("status")} for x in seasons],
            "units": "VORD in whole tokens; points as the season's rules (settings) count them; percent",
            "source": source(r, d)}
-    out["summary"] = (f"{s.get('name') or 'Season ' + str(s.get('season_id'))} is {s.get('status')}: budget "
+    out["summary"] = (f"Season {count(s.get('season_id'))} is {state(s.get('status'), 'in the state its status field names')}: budget "
                       f"{amount(out['budget_vord'], 0)} VORD, {out['participants'] if out['participants'] is not None else '—'} "
                       f"participants, {out['qualified_count'] if out['qualified_count'] is not None else '—'} qualified.")
     return out
@@ -656,9 +661,9 @@ def get_points(chain, cfg, params):
                     "until the season closes", "source": source(r, ar, det)}
     src = [f"{k.replace('_points', '')} {amount(row[k], 2)}" for k in
            ("trading_points", "referral_points", "referee_bonus_points", "social_points", "pool_points") if row[k]]
-    out["summary"] = (f"{short(a)} in {s.get('name') or 'season ' + str(s.get('season_id'))}: "
+    out["summary"] = (f"{short(a)} in season {count(s.get('season_id'))}: "
                       f"{amount(row['total_points'], 2)} points" + (f" ({', '.join(src)})" if src else "")
-                      + (f", rank {row['rank']}" + (f" of {total}" if total else "") if row["rank"] else ", not ranked yet")
+                      + (f", rank {count(row['rank'])}" + (f" of {total}" if total else "") if row["rank"] else ", not ranked yet")
                       + f", {'qualified' if row['qualified'] else 'not qualified yet'}"
                       + (f", about {amount(row['vord_estimate'], 2)} VORD" if row["vord_estimate"] else "") + ".")
     return out
@@ -691,7 +696,7 @@ def get_leaderboard(chain, cfg, params):
                "rows": rows, "computed_at": doc.get("computedAt"),
                "units": "USD; ranked from the network's own fills", "source": source(r)}
         out["summary"] = (f"Trading leaderboard ({window}, by {sort}): " +
-                          ("; ".join(f"#{x['rank']} {x['name'] or short(x['account'])} {usd(x['pnl_usd'])}" for x in rows[:3])
+                          ("; ".join(f"#{count(x['rank'])} {short(x['account'])} {usd(x['pnl_usd'])}" for x in rows[:3])
                            if rows else "no ranked traders yet") + ".")
         return out
     try:
@@ -705,8 +710,8 @@ def get_leaderboard(chain, cfg, params):
            "participants": doc.get("participants"), "rows": rows,
            "units": "points as the season counts them (its rules are in get_season); VORD in whole tokens, an estimate "
                     "until the season closes", "source": source(r, d)}
-    out["summary"] = (f"{s.get('name') or 'Season ' + str(s.get('season_id'))} top {len(rows)}: " +
-                      ("; ".join(f"#{x['rank']} {short(x['address'])} {amount(x['total_points'], 2)} pts" for x in rows[:3])
+    out["summary"] = (f"Season {count(s.get('season_id'))} top {len(rows)}: " +
+                      ("; ".join(f"#{count(x['rank'])} {short(x['address'])} {amount(x['total_points'], 2)} pts" for x in rows[:3])
                        if rows else "no one ranked yet") + ".")
     return out
 
@@ -730,7 +735,7 @@ def get_referrals(chain, cfg, params):
            if d.get("referee_discount_bps") is not None else None,
            "discount_on": "taker fees" if d.get("taker_only") is True else ("trading fees" if d.get("taker_only") is False else None),
            "units": "USD; percent", "source": source(r)}
-    out["summary"] = (f"{short(a)}: " + (f"referral code {d.get('code')}, tier {d.get('tier')}, referred volume "
+    out["summary"] = (f"{short(a)}: " + (f"referral code {code(d.get('code'), 'in the code field')}, tier {tier(d.get('tier'))}, referred volume "
                                          f"{usd(out['referred_volume_usd'], True)}, earned {usd(out['total_earned_usd'])}."
                                          if d.get("code") else "no referral code yet."))
     return out
@@ -755,7 +760,8 @@ def get_block(chain, cfg, params):
         reads.append(a)
         if a and a.ok and isinstance(a["json"], dict):
             doc = a["json"].get("block") or {}
-            ops = [{k: o.get(k) for k in ("op_index", "action_type", "actor", "summary")} for o in (a["json"].get("ops") or [])[:50]]
+            ops = [{("network_summary" if k == "summary" else k): o.get(k) for k in ("op_index", "action_type", "actor", "summary")}
+                   for o in (a["json"].get("ops") or [])[:50]]
     if not doc:
         return {"available": False, "network": chain.network, "height": n, "explorer": explorer_link(chain, "block", n),
                 "summary": f"Block {n:,} is not in the explorer's index (it may be ahead of the chain or not yet indexed).",
@@ -794,7 +800,8 @@ def get_tx(chain, cfg, params):
            "contract_created": doc.get("contract_address") if doc.get("is_create") else None,
            "explorer": link, "units": "value in VORD (whole tokens); evm_block counts EVM blocks, not chain heights "
                                       "(get_block takes a chain height)", "chain_answer": doc, "source": source(r)}
-    out["summary"] = (f"Transaction {short(h)} in EVM block {doc.get('block')}: {short(doc.get('from'))} → "
+    out["summary"] = (f"Transaction {short(h)}" + (f" in EVM block {doc['block']}" if count(doc.get("block"), None) else "")
+                      + f": {short(doc.get('from'))} → "
                       f"{short(doc.get('to') or doc.get('contract_address'))}, {amount(out['value_vord'])} VORD, "
                       f"{'succeeded' if out['succeeded'] else 'failed' if out['succeeded'] is False else 'status unknown'}. {link}")
     return out

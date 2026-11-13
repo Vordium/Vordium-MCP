@@ -20,6 +20,7 @@ from .chain import ChainUnreachable
 from .networks import NETWORKS
 from .schemas import LOCAL_READ, OUTPUT, READ, WRITE
 from .reads import NotServed, short, usd, amount
+from .text import DATA_NOTE, clean, count, ident, label, market, state, symbol
 
 ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 KEYISH_FIELD = re.compile(r"priv|secret|mnemonic|seed|passphrase|keystore|password|key_?file", re.I)
@@ -138,13 +139,13 @@ def network_identity(chain, force=False):
     if truth.get("chain_id") is not None:
         ids["truth"] = truth.get("chain_id")
     if len({v for v in ids.values()}) != 1:
-        problems.append(f"chain ids disagree: {ids}")
+        problems.append("chain ids disagree: " + ", ".join(f"{k} {ident(v)}" for k, v in ids.items()))
     gens = {k: v for k, v in (("spec", spec.get("genesisSha256")), ("truth", truth.get("genesis_sha256")),
                               ("status", status.get("genesis_sha256"))) if v}
     if len({str(v).lower().removeprefix("0x") for v in gens.values()}) > 1:
-        problems.append(f"genesis disagrees: {gens}")
+        problems.append("genesis disagrees: " + ", ".join(f"{k} {ident(v)}" for k, v in gens.items()))
     if truth.get("network") and truth.get("network") != chain.network:
-        problems.append(f"the network's own answer names {truth.get('network')!r}")
+        problems.append(f"the network's own answer names {state(truth.get('network'), 'another network')}")
     if problems:
         raise Refusal(f"this server was started for the {chain.network} but the addresses it reads disagree with that: "
                       + "; ".join(problems),
@@ -180,8 +181,8 @@ def read_switch(chain):
     if doc is None or doc.get("version") != 1:
         return {"established": False, "why": f"the network's answer could not be read ({r['status']})", "source": source(r)}
     if doc.get("ok") is not True:
-        return {"established": False, "why": f"the network cannot vouch right now: {doc.get('error') or 'not ok'}",
-                "source": source(r)}
+        return {"established": False, "why": "the network cannot vouch for its state right now (network_error)",
+                "network_error": clean(str(doc.get("error") or "not ok")), "source": source(r)}
     active = doc.get("agent_policy_active")
     if not isinstance(active, bool):
         return {"established": False, "why": "the network's answer carries no value for it", "source": source(r)}
@@ -208,7 +209,8 @@ def get_network(chain, cfg, params):
         out["summary"] = f"Connected to the {chain.network}; its own answer could not be read ({r['status']})."
         return _pin_summary(out)
     if doc.get("ok") is not True:
-        out["truth"] = {"established": False, "why": str(doc.get("error") or "not ok"), "stale": doc.get("stale")}
+        out["truth"] = {"established": False, "why": "the network cannot vouch for its state right now (network_error)",
+                        "network_error": clean(str(doc.get("error") or "not ok")), "stale": doc.get("stale")}
         out["summary"] = f"Connected to the {chain.network}; the network cannot vouch for its state right now."
         return _pin_summary(out)
     committed = doc.get("committed") or {}
@@ -229,9 +231,10 @@ def get_network(chain, cfg, params):
     out["note"] = ("These facts come from the network's own answer: several validators are read at once and compared. "
                    "When they cannot agree the answer says so, and this tool reports it as not established.")
     t = out["truth"]
-    out["summary"] = (f"Connected to the {chain.network} (chain id {t['chain_id']}): finalized block "
-                      f"{t['finalized_height']:,} agreed by {t['validators_agreeing']} of {t['validators_seated']} "
-                      f"validators; trading {({True: 'open', False: 'closed'}).get(t['trading_open'], 'unknown')}, agent trading "
+    agreed = (f" agreed by {t['validators_agreeing']} of {t['validators_seated']} validators"
+              if all(count(t[k], None) for k in ("validators_agreeing", "validators_seated")) else "")
+    out["summary"] = (f"Connected to the {chain.network}{' (chain id ' + count(t['chain_id']) + ')' if count(t['chain_id'], None) else ''}: "
+                      f"finalized block {t['finalized_height']:,}{agreed}; trading {({True: 'open', False: 'closed'}).get(t['trading_open'], 'unknown')}, agent trading "
                       f"{({True: 'on', False: 'off'}).get(t['agent_policy_active'], 'unknown')}." if isinstance(t.get("finalized_height"), int)
                       else f"Connected to the {chain.network}.")
     return _pin_summary(out)
@@ -267,9 +270,9 @@ def get_markets(chain, cfg, params):
         venue = {k: specs.get(k) for k in ("min_order_notional_6dec", "max_open_orders_per_wallet", "price_band_active",
                                            "price_band_bps", "funding_interval_secs", "withdrawal_fee_6dec")
                  if k in specs}
-    active = [r.get("symbol") for r in out if r.get("active") is not False and not r.get("paused") and not r.get("delisted")]
+    active = [market(r) for r in out if r.get("active") is not False and not r.get("paused") and not r.get("delisted")]
     return {"summary": f"{len(out)} markets on the {chain.network}, {len(active)} trading: "
-                       + ", ".join(str(x) for x in active[:12]) + ("…" if len(active) > 12 else "") + ".",
+                       + ", ".join(active[:12]) + ("…" if len(active) > 12 else "") + ".",
             "network": chain.network, "count": len(out), "markets": out, "venue_rules": venue,
             "units": "fees in basis points; leverage in basis points (10000 = 1x) and as x; 6dec fields are USDC "
                      "6-decimal integers; 8dec fields 8-decimal prices; 18dec fields 18-decimal sizes. A tick or lot "
@@ -293,7 +296,7 @@ def get_oracle(chain, cfg, params):
         pair = _pair(chain, params)
         out = [r for r in out if r.get("pair_id") == pair.get("pair_id")]
     one = out[0] if len(out) == 1 else None
-    return {"summary": (f"{one.get('market_symbol') or one.get('symbol')}: mark {usd(one.get('mark_price'))}, oracle "
+    return {"summary": (f"{symbol(one.get('market_symbol') or one.get('symbol'), 'market ' + count(one.get('pair_id')))}: mark {usd(one.get('mark_price'))}, oracle "
                         f"{usd(one.get('oracle_price'))}." if one else f"Oracle and mark prices for {len(out)} markets."),
             "network": chain.network, "prices": out, "units": "USD, as decimals",
             "source": source(o, chain.markets())}
@@ -320,9 +323,9 @@ def get_orderbook(chain, cfg, params):
     bids, asks = side(doc.get("bids")), side(doc.get("asks"))
     best_bid = bids[0]["price"] if bids else None
     best_ask = asks[0]["price"] if asks else None
-    return {"summary": (f"{pair.get('symbol')}: best bid {usd(best_bid)}, best ask {usd(best_ask)}, spread "
+    return {"summary": (f"{market(pair)}: best bid {usd(best_bid)}, best ask {usd(best_ask)}, spread "
                         f"{usd(round(best_ask - best_bid, 6))}; {len(bids)} bid and {len(asks)} ask levels shown."
-                        if best_bid is not None and best_ask is not None else f"{pair.get('symbol')}: the book is "
+                        if best_bid is not None and best_ask is not None else f"{market(pair)}: the book is "
                         f"{'empty' if not bids and not asks else 'one-sided'}."),
             "network": chain.network, "market": pair.get("symbol"), "pair_id": pair.get("pair_id"),
             "bids": bids, "asks": asks, "best_bid": best_bid, "best_ask": best_ask,
@@ -357,8 +360,8 @@ def get_funding(chain, cfg, params):
         out["source"] = source(f, hr)
     every = f"{iv // 3600} h" if isinstance(iv, int) and iv % 3600 == 0 else (f"{iv} s" if iv else "interval")
     who = "longs pay shorts" if (rate or 0) > 0 else ("shorts pay longs" if (rate or 0) < 0 else "no one pays")
-    out["summary"] = (f"{pair.get('symbol')} funding: {rate:+.6f}% per {every} ({who})." if isinstance(rate, (int, float))
-                      else f"{pair.get('symbol')}: the funding rate is not published.")
+    out["summary"] = (f"{market(pair)} funding: {rate:+.6f}% per {every} ({who})." if isinstance(rate, (int, float))
+                      else f"{market(pair)}: the funding rate is not published.")
     if out.get("history"):
         vals = [r["rate_pct"] for r in out["history"] if r["rate_pct"] is not None]
         if vals:
@@ -400,7 +403,7 @@ def get_positions(chain, cfg, params):
         if m and not it.get("symbol"):
             it["symbol"] = m.get("symbol")
     return {"summary": f"{short(address)} has {len(items)} open position{'s' if len(items) != 1 else ''}"
-                       + (": " + ", ".join(f"{it.get('symbol')} {'long' if it.get('is_long') else 'short'}" for it in items[:8])
+                       + (": " + ", ".join(f"{symbol(it.get('symbol'), 'market ' + count(it.get('pair_id')))} {'long' if it.get('is_long') else 'short'}" for it in items[:8])
                           if items else "") + ". get_account adds entry, mark, PnL and liquidation prices.",
             "network": chain.network, "address": address, "count": len(items), "positions": items,
             "note": "Fields are the chain's own. Prices are 8-decimal integers where named _8dec, sizes 18-decimal "
@@ -661,8 +664,8 @@ def _write(chain, cfg, kind, params, do, precheck=None, describe=None):
             answer = {"status": "unknown", "delivery_unknown": True, "detail": str(e)[:300],
                       "nonce": getattr(e, "nonce", None), "attempts": getattr(e, "attempts", None)}
             return _unknown(chain, kind, agent, asked, answer)
-        raise Refusal(f"{kind}: it failed while signing or sending ({type(e).__name__}: {str(e)[:200]}); it may have reached "
-                      "the chain", remedy="Read get_orders and get_positions before trying again.",
+        raise Refusal(f"{kind}: it failed while signing or sending ({type(e).__name__}); it may have reached "
+                      "the chain", readings={"error": clean(str(e))}, remedy="Read get_orders and get_positions before trying again.",
                       note="It may have been signed and sent: check before trying again.")
     code = answer.get("status_code") if isinstance(answer, dict) else None
     # a copy of the same signed request was sent again after a lost answer, and the chain said its nonce was used: the
@@ -768,11 +771,11 @@ def _place(chain, cfg, params, kind):
                             leverage=leverage, order_type=otype, reduce_only=bool(params.get("reduce_only", False)),
                             post_only=bool(params.get("post_only", False)), client_nonce=nonce[0])
     def describe(pair):
-        what = (f"{'Buy' if side == 0 else 'Sell'} {_num(params.get('size'))} {pair.get('name') or pair.get('symbol')} "
+        what = (f"{'Buy' if side == 0 else 'Sell'} {_num(params.get('size'))} {label(pair)} "
                 + (f"at {_num(params.get('price'))} (limit)" if otype == 1 else "at the market price")
                 + f", {_num(params.get('leverage', 1))}x"
                 + (", reduce only" if params.get("reduce_only") else "") + f", on the {chain.network}.")
-        return what, {"market": pair.get("name") or pair.get("symbol"), "side": "buy" if side == 0 else "sell", "size": size,
+        return what, {"market": label(pair), "side": "buy" if side == 0 else "sell", "size": size,
                       "order_type": "limit" if otype == 1 else "market", "price": price if otype == 1 else None,
                       "leverage": leverage, "reduce_only": bool(params.get("reduce_only", False))}
     out = _write(chain, cfg, kind, params, do, precheck, describe)
@@ -834,7 +837,7 @@ def my_buying_power(chain, cfg, params):
         ctx = pretrade.Ctx(chain, cfg.owner, p["pair_id"], agent)
         cap = pretrade.leverage_cap(ctx)
         levs = [l for l in (10000, 20000, 30000, 50000, 100000, 200000, 500000) if l <= cap] or ([cap] if cap else [])
-        out.append({"market": p.get("name") or p.get("symbol"), "max_leverage": cap / 10000,
+        out.append({"market": label(p), "max_leverage": cap / 10000,
                     "by_leverage": [{"leverage": l / 10000, "max_long": pretrade.units(pretrade.max_size(ctx, "buy", l), 18),
                                      "max_short": pretrade.units(pretrade.max_size(ctx, "sell", l), 18)} for l in levs]})
     return {"summary": "Sizes at the mark, from free margin" + (" and the agent's limits" if agent else "") + ".", "markets": out}
@@ -968,8 +971,9 @@ def get_order(chain, cfg, params):
                 "source": source(o)}
     m = chain.pair_by_id(hit.get("pair_id")) or {}
     hit.setdefault("symbol", m.get("symbol"))
-    return {"summary": f"Order {order_id}: {str(hit.get('side', '')).lower()} {hit.get('symbol')} "
-                       f"{hit.get('order_type', '')}, {amount(hit.get('remaining_18dec'), 18)} left of {amount(hit.get('size'), 18)}.",
+    return {"summary": f"Order {order_id}: {state(hit.get('side'), '')} "
+                       f"{symbol(hit.get('symbol'), 'market ' + count(hit.get('pair_id')))} "
+                       f"{state(hit.get('order_type'), '')}, {amount(hit.get('remaining_18dec'), 18)} left of {amount(hit.get('size'), 18)}.",
             "network": chain.network, "address": owner, "order_id": order_id, "found": True, "order": hit,
             "source": source(o)}
 
@@ -982,7 +986,7 @@ def close_position(chain, cfg, params):
     pair = _pair(chain, params, required=True)
     pos, _ = _position(chain, cfg.owner, pair["pair_id"])
     if pos is None:
-        raise Refusal(f"close_position: {cfg.owner} has no open position in {pair.get('name') or pair.get('symbol')}",
+        raise Refusal(f"close_position: {cfg.owner} has no open position in {label(pair)}",
                       remedy="get_positions lists the account's positions. Nothing was signed or sent.")
     try:
         frac = float(params.get("fraction", 1))
@@ -1025,7 +1029,7 @@ def cancel_all(chain, cfg, params):
         ok = all(isinstance(a.get("status_code"), int) and 200 <= a["status_code"] < 300 for a in answers)
         return {"status_code": 202 if ok else 400, "one_by_one": len(answers), "answers": answers}
     out = _write(chain, cfg, "cancel_all", params, do)
-    out["scope"] = (pair or {}).get("name") or (pair or {}).get("symbol") or "every market"
+    out["scope"] = label(pair) if pair else "every market"
     return out
 
 
@@ -1083,7 +1087,7 @@ def modify_order(chain, cfg, params):
 
     def describe(pair):
         from decimal import Decimal
-        what = (f"Change order {order_id} ({side} {pair.get('name') or pair.get('symbol')}) to "
+        what = (f"Change order {order_id} ({side} {label(pair)}) to "
                 f"{_num(Decimal(new_size) / Decimal(10 ** 18))} at {_num(Decimal(new_price) / Decimal(10 ** 8))}, on the "
                 f"{chain.network}: it leaves the book and a new order rests in its place.")
         return what, {"order_id": order_id, "new_price": new_price / 1e8, "new_size": new_size / 1e18}
@@ -1106,7 +1110,7 @@ def set_tpsl(chain, cfg, params):
     pair = _pair(chain, params, required=True)
     pos, _ = _position(chain, cfg.owner, pair["pair_id"])
     if pos is None:
-        raise Refusal(f"set_tpsl: {cfg.owner} has no open position in {pair.get('name') or pair.get('symbol')}",
+        raise Refusal(f"set_tpsl: {cfg.owner} has no open position in {label(pair)}",
                       remedy="A take-profit or stop-loss belongs to an open position. Nothing was signed or sent.")
     pid = pos.get("id", pos.get("position_id"))
     t = chain.read(f"/tpsl/{cfg.owner}", cache=False)
@@ -1158,7 +1162,7 @@ def set_tpsl(chain, cfg, params):
     def describe(_pair):
         from decimal import Decimal
         f = lambda v: "none" if not v else _num(Decimal(v) / Decimal(10 ** 8))
-        return (f"{pair.get('name') or pair.get('symbol')} {'long' if long_ else 'short'} position: take-profit {f(tp)}, "
+        return (f"{label(pair)} {'long' if long_ else 'short'} position: take-profit {f(tp)}, "
                 f"stop-loss {f(sl)} (now {f(now_tp)} / {f(now_sl)}), on the {chain.network}."), {"take_profit": tp / 1e8 or None,
                                                                                                "stop_loss": sl / 1e8 or None}
 
@@ -1407,15 +1411,28 @@ def listed_tools(cfg):
     return [t for t in TOOLS if not (t.get("write") and cfg.read_only)]
 
 
+# results that carry names or other text the network was given (market, agent and season names, mandates, codes,
+# refusal meanings): each says that this text is data
+NETWORK_TEXT = ("get_status", "get_network", "get_markets", "get_fees", "get_oracle", "get_orderbook", "get_positions",
+                "get_orders", "get_order", "get_account", "get_fills", "get_agents", "get_policy", "get_risk",
+                "get_season", "get_points", "get_leaderboard", "get_referrals", "get_tiers", "get_tx", "get_block",
+                "check_order", "my_buying_power", "place_order", "close_position", "modify_order", "set_tpsl",
+                "cancel_order", "cancel_all")
+
+
 def call(chain, cfg, name, params):
     tool = next((t for t in listed_tools(cfg) if t["name"] == name), None)
     if tool is None:
         raise Refusal(f"no tool named {name!r} on this server", remedy="Call tools/list.")
     reject_key_material(params, tool.get("hash_args", ()))
     try:
-        return tool["handler"](chain, cfg, params or {})
+        out = tool["handler"](chain, cfg, params or {})
+        if name in NETWORK_TEXT and isinstance(out, dict):
+            out.setdefault("data_note", DATA_NOTE)
+        return out
     except NotServed as e:
         raise Refusal(f"{e}", remedy="Nothing is filled in from memory. get_status shows what the network serves now.")
     except ChainUnreachable as e:
         raise Refusal(f"the network could not be read: {e}",
+                      readings={"network_answer": e.answer} if getattr(e, "answer", None) else None,
                       remedy="No value is returned from memory. Try again when the network answers.")

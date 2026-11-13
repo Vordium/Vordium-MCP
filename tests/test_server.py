@@ -86,7 +86,9 @@ def test_network_not_established_when_validators_disagree():
     n = NETWORKS["testnet"]
     net, cfg, chain = setup(**{n["truth"]: {"version": 1, "ok": False, "error": "disagree"}})
     err, doc = call(chain, cfg, "get_network")
-    assert not err and doc["truth"] == {"established": False, "why": "disagree", "stale": None}
+    assert not err and doc["truth"] == {"established": False, "network_error": "disagree", "stale": None,
+                                        "why": "the network cannot vouch for its state right now (network_error)"}
+    assert "disagree" not in doc["summary"]
 
 
 def test_units_are_decoded():
@@ -223,7 +225,8 @@ def test_switch_not_established_refuses():
     n = NETWORKS["testnet"]
     net, cfg, chain = setup(**{n["truth"]: {"version": 1, "ok": False, "error": "stale"}})
     err, doc = call(chain, trading_cfg(cfg), "place_order", ORDER)
-    assert err and "cannot be confirmed" in doc["reason"] and "stale" in doc["reason"]
+    assert err and "cannot be confirmed" in doc["reason"] and "stale" not in doc["reason"]   # the network's words stay data
+    assert doc["readings"]["policy_switch"]["network_error"] == "stale"
 
 
 def test_switch_unreachable_refuses():
