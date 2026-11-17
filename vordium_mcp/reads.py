@@ -7,7 +7,7 @@ sentence a person can read — next to the raw fields and the units they are in.
 import re
 import time
 
-from .chain import ChainUnreachable
+from .chain import ChainUnreachable, answered
 from .text import code, count, market, state, symbol, tier
 
 ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
@@ -92,7 +92,7 @@ def _doc(read, what):
     if read["status"] in (404, 400) or (read["status"] == 200 and read["json"] is None):
         raise NotServed(f"the network does not serve {what} ({read['status']})")
     if not read.ok:
-        raise ChainUnreachable(f"{what}: {read['url']} answered {read['status']}")
+        raise ChainUnreachable(f"{what}: {answered(read)}")
     return read["json"]
 
 

@@ -1,13 +1,21 @@
 # Changelog
 
+## 0.6.6
+- Every read that is not served (tool reads, resources, agent records and the order pre-check) is reported with one
+  sentence: the address that was read and its status, and for a redirect "a redirect, not followed: use the node's
+  https address". No read follows a redirect.
+- When `stop_all` cannot save its stop (the state folder cannot be written), its answer says that this server may still
+  sign new orders, and how to stop it: stop the server process, or fix the state folder (`--state-dir`) and run
+  `stop_all` again. Its cancels are sent either way.
+
 ## 0.6.5
 - Order confirmations (`place_order`, `modify_order`, `set_tpsl`) name the market by its signed symbol and pair id,
   for example `ETHUSDT (pair id 1)`, so a market whose display name matches another market cannot be confused with it.
 - Market names in the `vordium://fees` resource and the network text in the spec resource are cleaned and capped like
   tool results, and both resources say that network text is data.
-- `stop_all` always sends its cancels. When its stop cannot be saved on this device, the answer says so and that
-  signing may still happen from another device.
-- Network reads do not follow HTTP redirects. A redirect is refused with a sentence naming the node's https address.
+- `stop_all` always sends its cancels. When its stop cannot be saved, the answer says that this server may still sign
+  new orders and how to stop it.
+- Network reads do not follow HTTP redirects.
 - The `trade` extra requires `vordium>=1.6.1`.
 
 ## 0.6.4

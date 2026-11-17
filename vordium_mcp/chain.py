@@ -13,6 +13,17 @@ from .text import clean
 USER_AGENT = f"vordium-mcp/{__version__} (+https://docs.vordium.com/build/mcp/)"
 
 
+
+REDIRECT_NOTE = " (a redirect, not followed: use the node's https address)"
+
+
+def answered(read):
+    """The one sentence for a read that was not served: its address and status, and for a redirect, that it was not
+    followed. Every place that reports a failed read uses it, so a redirect always reads the same."""
+    st = read["status"]
+    moved = isinstance(st, int) and 300 <= st < 400
+    return f"{read['url']} answered {st}" + (REDIRECT_NOTE if moved else "")
+
 class ChainUnreachable(RuntimeError):
     """The network could not be read. Never swallowed: a tool that cannot read says so. ``answer`` is the network's
     own text, when it sent one."""
@@ -240,10 +251,7 @@ class Chain:
     # ── helpers over those reads (still nothing typed) ───────────────────────
     def require(self, read, what):
         if not read.ok:                 # the body is the network's text: carried as data, never in the sentence
-            st = read["status"]
-            moved = isinstance(st, int) and 300 <= st < 400
-            e = ChainUnreachable(f"{what}: {read['url']} answered {st}"
-                                 + (" (a redirect, not followed: use the node's https address)" if moved else ""))
+            e = ChainUnreachable(f"{what}: {answered(read)}")
             e.answer = clean(read["text"]) if read.get("text") else None
             raise e
         return read["json"]

@@ -16,7 +16,7 @@ import time
 import re
 
 from . import reads
-from .chain import ChainUnreachable
+from .chain import ChainUnreachable, answered
 from .networks import NETWORKS
 from .schemas import LOCAL_READ, OUTPUT, READ, WRITE
 from .reads import NotServed, short, usd, amount
@@ -442,7 +442,7 @@ def _agent_view(chain, params, kind, keys, note):
     r = chain.agent(owner, str(agent)) if agent is not None else chain.agents(owner)
     if not r.ok:
         return {"summary": f"The agent records of {short(owner)} could not be read ({r['status']}).",
-                "available": False, "owner": owner, "reason": f"the agent route answered {r['status']}",
+                "available": False, "owner": owner, "reason": f"the agent route: {answered(r)}",
                 "note": f"No {kind} is returned from defaults or memory.", "source": source(r)}
     doc = r["json"] or {}
     records = ([] if doc.get("found") is False else [doc]) if agent is not None else list(doc.get("agents") or [])
@@ -543,7 +543,7 @@ def _agent_ready(chain, cfg, signer):
     status = st["json"] if st.ok and isinstance(st["json"], dict) else None
     readings["status"] = source(st)[0]
     if status is None:
-        blockers.append({"blocker": "node status unreadable", "detail": f"{st['url']} answered {st['status']}"})
+        blockers.append({"blocker": "node status unreadable", "detail": answered(st)})
     else:
         if status.get("trading_open") is False or status.get("trading_active") is False:
             blockers.append({"blocker": "trading not open", "detail": f"trading_blockers {status.get('trading_blockers')}"})
