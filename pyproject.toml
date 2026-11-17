@@ -26,7 +26,9 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-trade = ["vordium>=1.4.10", "keyring>=24"]
+# The SDK floor is the first release that signs and reads safely: no redirect following, ASCII-only figures, its own
+# network pins. A floor below it lets an install keep an SDK without those rules.
+trade = ["vordium>=1.6.1", "keyring>=24"]
 
 [project.urls]
 Homepage = "https://vordium.com"

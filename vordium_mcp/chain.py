@@ -31,6 +31,16 @@ class Read(dict):
         return self.get("status") == 200 and self.get("json") is not None
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is answered as it came (its status), never followed: every read stays on the address it was sent to."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _http(method, url, body=None, timeout=12):
     data = json.dumps(body).encode() if body is not None else None
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
@@ -38,7 +48,7 @@ def _http(method, url, body=None, timeout=12):
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _OPENER.open(req, timeout=timeout) as r:
             return getattr(r, "status", 200), r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "replace")
@@ -230,7 +240,10 @@ class Chain:
     # ── helpers over those reads (still nothing typed) ───────────────────────
     def require(self, read, what):
         if not read.ok:                 # the body is the network's text: carried as data, never in the sentence
-            e = ChainUnreachable(f"{what}: {read['url']} answered {read['status']}")
+            st = read["status"]
+            moved = isinstance(st, int) and 300 <= st < 400
+            e = ChainUnreachable(f"{what}: {read['url']} answered {st}"
+                                 + (" (a redirect, not followed: use the node's https address)" if moved else ""))
             e.answer = clean(read["text"]) if read.get("text") else None
             raise e
         return read["json"]

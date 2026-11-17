@@ -91,6 +91,13 @@ def market(pair):
     return symbol(pair.get("symbol"), None) or f"market {count(pair.get('pair_id'), '?')}"
 
 
+def signed_market(pair):
+    """A market in an order confirmation: the symbol and pair id the order is signed for (never the display name, which a
+    listing may set to look like another market)."""
+    pair = pair if isinstance(pair, dict) else {}
+    return f"{market(pair)} (pair id {count(pair.get('pair_id'), '?')})"
+
+
 def label(pair):
     """A market as a person names it, in the server's own sentence or a confirmation: its short name when symbol()
     accepts it (ETH), else as market() gives it."""

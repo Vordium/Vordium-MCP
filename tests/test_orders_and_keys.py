@@ -167,7 +167,7 @@ def test_an_order_is_signed_only_after_the_user_confirms(stub):
     err, doc = run(chain, trading(cfg, stub), "place_order", ORDER, asker)
     assert not err and doc["confirmation"] == {"asked": True, "confirmed": True} and stub.sent[0][0] == "place"
     msg, schema = asker.asked[0]
-    assert "Buy 0.01 ETH at 2400 (limit)" in msg and schema["required"] == ["confirm"]
+    assert "Buy 0.01 ETHUSDT (pair id 1) at 2400 (limit)" in msg and schema["required"] == ["confirm"]
 
 
 @pytest.mark.parametrize("answer", [Asker("decline"), Asker("cancel"), Asker("accept", False)])
@@ -473,7 +473,7 @@ def test_the_question_shows_the_figures_exactly(stub):
     net, cfg, chain = setup(active=True, **routes())
     asker = Asker("decline")
     run(chain, trading(cfg, stub), "place_order", {**ORDER, "price": 101234.5, "size": "0.0012345678"}, asker)
-    assert "Buy 0.0012345678 ETH at 101234.5 (limit)" in asker.asked[0][0]
+    assert "Buy 0.0012345678 ETHUSDT (pair id 1) at 101234.5 (limit)" in asker.asked[0][0]
 
 
 class PlaintextKeyring(FakeKeyring):
@@ -538,3 +538,15 @@ def test_a_stopped_server_does_not_even_ask(stub):
     asker = Asker()
     err, doc = run(chain, c, "place_order", ORDER, asker)
     assert err and "stopped with stop_all (earlier)" in doc["reason"] and asker.asked == [] and stub.sent == []
+
+
+def test_stop_all_still_cancels_and_says_so_when_the_stop_cannot_be_saved(stub, tmp_path):
+    net, cfg, chain = setup(active=True, **routes())
+    blocker = tmp_path / "not-a-folder"
+    blocker.write_text("x")                                       # the state folder is a file: the lock cannot be written
+    import dataclasses
+    c = dataclasses.replace(trading(cfg, stub, "auto"), state_dir=str(blocker / "sub"))
+    err, doc = run(chain, c, "stop_all", {})
+    assert not err and doc["stopped"] is False and doc["lock"] is None
+    assert stub.sent == [("cancel_all", {"pair_id": 0})]          # the cancels still went out
+    assert "could NOT be saved" in doc["summary"] and "may still sign" in doc["summary"]

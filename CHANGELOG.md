@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.5
+- Order confirmations (`place_order`, `modify_order`, `set_tpsl`) name the market by its signed symbol and pair id,
+  for example `ETHUSDT (pair id 1)`, so a market whose display name matches another market cannot be confused with it.
+- Market names in the `vordium://fees` resource and the network text in the spec resource are cleaned and capped like
+  tool results, and both resources say that network text is data.
+- `stop_all` always sends its cancels. When its stop cannot be saved on this device, the answer says so and that
+  signing may still happen from another device.
+- Network reads do not follow HTTP redirects. A redirect is refused with a sentence naming the node's https address.
+- The `trade` extra requires `vordium>=1.6.1`.
+
 ## 0.6.4
 - Text the network returns (market, agent and season names, mandates, referral codes, refusal meanings, error bodies)
   is data: it stays in its own field, with control and format characters removed, names capped at 64 characters and

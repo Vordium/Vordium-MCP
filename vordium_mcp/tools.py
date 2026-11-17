@@ -20,7 +20,7 @@ from .chain import ChainUnreachable
 from .networks import NETWORKS
 from .schemas import LOCAL_READ, OUTPUT, READ, WRITE
 from .reads import NotServed, short, usd, amount
-from .text import DATA_NOTE, clean, count, ident, label, market, state, symbol
+from .text import DATA_NOTE, clean, count, ident, label, market, signed_market, state, symbol
 
 ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 KEYISH_FIELD = re.compile(r"priv|secret|mnemonic|seed|passphrase|keystore|password|key_?file", re.I)
@@ -771,11 +771,11 @@ def _place(chain, cfg, params, kind):
                             leverage=leverage, order_type=otype, reduce_only=bool(params.get("reduce_only", False)),
                             post_only=bool(params.get("post_only", False)), client_nonce=nonce[0])
     def describe(pair):
-        what = (f"{'Buy' if side == 0 else 'Sell'} {_num(params.get('size'))} {label(pair)} "
+        what = (f"{'Buy' if side == 0 else 'Sell'} {_num(params.get('size'))} {signed_market(pair)} "
                 + (f"at {_num(params.get('price'))} (limit)" if otype == 1 else "at the market price")
                 + f", {_num(params.get('leverage', 1))}x"
                 + (", reduce only" if params.get("reduce_only") else "") + f", on the {chain.network}.")
-        return what, {"market": label(pair), "side": "buy" if side == 0 else "sell", "size": size,
+        return what, {"market": signed_market(pair), "pair_id": pair.get("pair_id"), "side": "buy" if side == 0 else "sell", "size": size,
                       "order_type": "limit" if otype == 1 else "market", "price": price if otype == 1 else None,
                       "leverage": leverage, "reduce_only": bool(params.get("reduce_only", False))}
     out = _write(chain, cfg, kind, params, do, precheck, describe)
@@ -1087,7 +1087,7 @@ def modify_order(chain, cfg, params):
 
     def describe(pair):
         from decimal import Decimal
-        what = (f"Change order {order_id} ({side} {label(pair)}) to "
+        what = (f"Change order {order_id} ({side} {signed_market(pair)}) to "
                 f"{_num(Decimal(new_size) / Decimal(10 ** 18))} at {_num(Decimal(new_price) / Decimal(10 ** 8))}, on the "
                 f"{chain.network}: it leaves the book and a new order rests in its place.")
         return what, {"order_id": order_id, "new_price": new_price / 1e8, "new_size": new_size / 1e18}
@@ -1162,7 +1162,7 @@ def set_tpsl(chain, cfg, params):
     def describe(_pair):
         from decimal import Decimal
         f = lambda v: "none" if not v else _num(Decimal(v) / Decimal(10 ** 8))
-        return (f"{label(pair)} {'long' if long_ else 'short'} position: take-profit {f(tp)}, "
+        return (f"{signed_market(pair)} {'long' if long_ else 'short'} position: take-profit {f(tp)}, "
                 f"stop-loss {f(sl)} (now {f(now_tp)} / {f(now_sl)}), on the {chain.network}."), {"take_profit": tp / 1e8 or None,
                                                                                                "stop_loss": sl / 1e8 or None}
 
@@ -1180,10 +1180,16 @@ def stop_all(chain, cfg, params):
     if not cfg.owner:
         raise Refusal("stop_all needs the owner account: start the server with --owner")
     p = stop_lock(cfg)
-    os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
     at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    with open(p, "w", encoding="utf-8") as fh:
-        _json.dump({"at": at, "network": chain.network, "owner": cfg.owner}, fh)
+    locked, lock_note = True, ""
+    try:                                               # the lock may not be writable: the cancels still go out
+        os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            _json.dump({"at": at, "network": chain.network, "owner": cfg.owner}, fh)
+    except OSError as e:
+        locked = False
+        lock_note = (f"The stop could NOT be saved ({type(e).__name__} at {p}): this server may still sign new orders. "
+                     "Stop the server process, or fix the state folder (--state-dir) and run stop_all again. ")
     try:
         cancelled = cancel_all(chain, cfg, {})
         cancel_note = cancelled.get("summary")
@@ -1193,9 +1199,10 @@ def stop_all(chain, cfg, params):
         cancelled, cancel_note = None, (f"open orders may NOT be cancelled ({type(e).__name__}): read get_orders and cancel "
                                         "them with cancel_all")
     app = (NETWORKS.get(chain.network) or {}).get("app", "")
-    return {"summary": f"Stopped at {at}: this server signs nothing new (only cancels) until `{_resume_hint(cfg)}`. "
-                       f"{cancel_note} To end the agent itself on the chain, revoke it in Vordex → Agents (your wallet signs).",
-            "network": chain.network, "stopped": True, "at": at, "lock": p, "cancel_all": cancelled,
+    head = (f"Stopped at {at}: this server signs nothing new (only cancels) until `{_resume_hint(cfg)}`. " if locked
+            else lock_note)
+    return {"summary": f"{head}{cancel_note} To end the agent itself on the chain, revoke it in Vordex → Agents (your wallet signs).",
+            "network": chain.network, "stopped": locked, "at": at, "lock": p if locked else None, "cancel_all": cancelled,
             "revoke_on_chain": f"{app}/agents" if app else None,
             "note": "An agent key cannot revoke itself on the chain: only the owner can (Agents → Revoke)."}
 
