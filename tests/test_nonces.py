@@ -44,6 +44,20 @@ def test_an_answer_for_a_copy_that_already_arrived_reads_as_received(stub):
     assert not err and doc["accepted"] is True and doc["already_received"] is True and "not made twice" in doc["summary"]
 
 
+def _sdk_reads(monkeypatch, vx, answer):
+    """An SDK that reads a lost answer back itself (``settle_s``) reads the node through ``vx._read``: serve it from
+    ``answer(path)`` and let it look once. An older SDK reads through its own helpers (patched by the
+    caller). Returns the keyword arguments for the call."""
+    import inspect
+    if not hasattr(vx, "_read") or "settle_s" not in inspect.signature(vx.place_order).parameters:
+        return {}
+    from vordium import outcome as sdk_outcome
+
+    monkeypatch.setattr(vx, "_read", lambda path: (200, {"chain_head": 5} if path.startswith("/status") else answer(path)))
+    monkeypatch.setattr(sdk_outcome, "interval", lambda elapsed: 0.01)
+    return {"settle_s": 0.05}
+
+
 def _sdk_place(monkeypatch, listed):
     """The real signer path (SDK) with a fake intake: the first answer is lost, the same body is sent again and the
     chain answers it with the nonce code."""
@@ -77,7 +91,10 @@ def _sdk_place(monkeypatch, listed):
     vx = dex.Vordex(rpc_url="http://rpc.invalid", identity=lambda: NodeIdentity(p.chain_id, p.genesis_sha256),
                     network="testnet", chain_clock=None)
     monkeypatch.setattr(vx, "order_by_client_nonce", lambda o, n, signed=None: listed(n, signed))
-    out = vx.place_order(Account.create().key.hex(), OWNER, 1, dex.BUY, 1, 100, client_nonce=nonces.next_nonce(OWNER))
+    cn = nonces.next_nonce(OWNER)
+    row = listed(cn, {"pair_id": 1, "side": 0, "size_18dec": 10 ** 18, "price_8dec": 100 * 10 ** 8})
+    kw = _sdk_reads(monkeypatch, vx, lambda path: ([row] if row else []) if path.startswith("/orders/") else {"events": []})
+    out = vx.place_order(Account.create().key.hex(), OWNER, 1, dex.BUY, 1, 100, client_nonce=cn, **kw)
     assert bodies[0] is bodies[1] and len(seen) == 1
     return out
 
@@ -93,8 +110,9 @@ def test_the_sdk_place_without_a_read_back_is_unknown_and_the_tool_says_so(monke
     net, cfg, chain = setup(active=True, **routes())
     stub.ok = dict(out)
     err, doc = run(chain, trading(cfg, stub, orders="auto"), "place_order", ORDER)
-    assert not err and doc["accepted"] is None and doc["delivery_unknown"] is True and "not known" in doc["summary"]
-    assert doc["already_received"] is False
+    assert not err and doc["accepted"] is None and doc["delivery_unknown"] is True and doc["state"] == "pending_checking"
+    assert doc["summary"].startswith("place_order: Pending — checking.") and doc["already_received"] is False
+    assert doc["follow_up"]["tool"] == "check_outcome" and doc["follow_up"]["arguments"]["kind"] == "order"
 
 
 def test_a_delivery_unknown_from_the_sdk_is_reported_as_unknown_never_refused(stub):
@@ -106,7 +124,8 @@ def test_a_delivery_unknown_from_the_sdk_is_reported_as_unknown_never_refused(st
     stub.place = lost
     err, doc = run(chain, trading(cfg, stub, orders="auto"), "place_order", ORDER)
     assert not err and doc["accepted"] is None and doc["delivery_unknown"] is True and "refused" not in doc
-    assert "may have reached the chain" in doc["summary"] and "open orders" in doc["summary"]
+    assert doc["state"] == "pending_checking" and "Do not place it again" in doc["summary"]
+    assert doc["resend"]["allowed"] is False and doc["follow_up"]["arguments"]["client_nonce"] == stub.sent[0][1]["client_nonce"]
 
 
 def test_a_cancel_whose_first_copy_landed_reads_as_accepted_or_unknown_never_refused(stub):
@@ -147,13 +166,15 @@ def test_the_sdk_cancel_reads_the_orders_back_through_the_tool(monkeypatch):
     monkeypatch.setattr(_http, "post", post)
     vx = dex.Vordex(rpc_url="http://rpc.invalid", identity=lambda: NodeIdentity(p.chain_id, p.genesis_sha256),
                     network="testnet", chain_clock=None)
-    monkeypatch.setattr(vx, "_get", lambda path: {"events": [{"kind": "order_cancelled", "order_id": 77}]}
-                        if path.startswith("/events/") else [])
-    out = vx.cancel_order(Account.create().key.hex(), OWNER, 77)
+    def gone(how):
+        ans = lambda path: {"events": [how]} if path.startswith("/events/") else []
+        monkeypatch.setattr(vx, "_get", ans)
+        return _sdk_reads(monkeypatch, vx, ans)
+    kw = gone({"kind": "order_cancelled", "order_id": 77})
+    out = vx.cancel_order(Account.create().key.hex(), OWNER, 77, **kw)
     assert out["status"] == "done" and out["already_received"] is True
-    monkeypatch.setattr(vx, "_get", lambda path: {"events": [{"kind": "order_closed", "order_id": 77, "status": "filled"}]}
-                        if path.startswith("/events/") else [])
-    assert vx.cancel_order(Account.create().key.hex(), OWNER, 77)["status"] == "filled"
+    kw = gone({"kind": "order_closed", "order_id": 77, "status": "filled"})
+    assert vx.cancel_order(Account.create().key.hex(), OWNER, 77, **kw)["status"] == "filled"
 
 
 
@@ -161,7 +182,8 @@ def test_a_cancel_after_a_fill_is_not_accepted_and_a_never_sent_write_is_refused
     net, cfg, chain = setup(active=True, **routes())
     stub.ok = {"status": "filled", "already_received": False, "order_gone": True, "status_code": None}
     err, doc = run(chain, trading(cfg, stub), "cancel_order", {"order_id": 77}, None)
-    assert not err and doc["accepted"] is False and "filled before the cancel" in doc["summary"]
+    assert not err and doc["accepted"] is False and "Filled before the cancel." in doc["summary"]
+    assert doc["state"] == "applied_other" and doc["next"] == "Check your position."
 
     def unreachable(cfg, rest, **kw):
         raise nonces.DeliveryUnknown("The network could not be reached after 3 tries; nothing was sent.", None, 3, never_sent=True)

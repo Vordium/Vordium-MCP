@@ -1,6 +1,6 @@
 {
  "package": "vordium-mcp",
- "version": "0.6.6",
+ "version": "0.7.0",
  "tools": [
   {
    "name": "get_status",
@@ -1655,6 +1655,156 @@
    "where": "everywhere"
   },
   {
+   "name": "check_outcome",
+   "title": "Request outcome",
+   "description": "What a write whose answer was lost did, read from the node only (never the explorer): an order by its client nonce, a cancel by its order id, or a cancel-all by the order ids open before it. One check of up to 20 seconds (8 on a hosted server): applied, refused (with the chain's reason), still being checked, or still not known after 2 minutes. A write tool whose answer was lost names this call with its arguments. Ask: \"Did my lost order go through?\"",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "kind": {
+      "type": "string",
+      "enum": [
+       "order",
+       "cancel",
+       "cancel_all"
+      ],
+      "description": "which write: order, cancel or cancel_all"
+     },
+     "address": {
+      "type": "string",
+      "description": "the account (default: the server's configured owner)",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+     },
+     "client_nonce": {
+      "type": "integer",
+      "description": "kind order: the order's client nonce, as the write tool returned it",
+      "minimum": 1
+     },
+     "order_id": {
+      "type": "integer",
+      "description": "kind cancel: the id of the order that was being cancelled",
+      "minimum": 0
+     },
+     "order_ids": {
+      "type": "array",
+      "items": {
+       "type": "integer"
+      },
+      "maxItems": 500,
+      "description": "kind cancel_all: the order ids open before it was sent, as the write tool returned them"
+     },
+     "pair_id": {
+      "type": "integer",
+      "description": "optional: the market the order or cancel-all was for"
+     },
+     "agent": {
+      "type": "string",
+      "description": "kind order, optional: the agent that signed it (its refusal records are read too)"
+     },
+     "since_ms": {
+      "type": "integer",
+      "description": "when it was sent (unix milliseconds): past 2 minutes, not proven reads as still not known",
+      "minimum": 0
+     }
+    },
+    "required": [
+     "kind"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "summary": {
+      "type": "string",
+      "description": "one plain sentence"
+     },
+     "network": {
+      "type": "string",
+      "description": "testnet or mainnet"
+     },
+     "kind": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "address": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "client_nonce": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "refusal_reason": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "refusal_meaning": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "state": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "pending_checking, applied, applied_other, refused or still_unknown"
+     },
+     "text": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "next": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "resend": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "read": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "follow_up": {
+      "type": [
+       "object",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "summary",
+     "network"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "title": "Request outcome"
+   },
+   "where": "everywhere"
+  },
+  {
    "name": "check_order",
    "title": "Check an order",
    "description": "Check an order against every rule the network runs (market, size, price band, margin, the agent's limits) for the configured owner and agent, without signing or sending anything: whether it would be taken, each rule it breaks with the real numbers, and fixes that pass. Ask: \"Can I buy 0.1 ETH at 20x?\"",
@@ -1939,6 +2089,43 @@
        "null"
       ]
      },
+     "state": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "pending_checking, applied, applied_other, refused or still_unknown"
+     },
+     "text": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "next": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "resend": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "read": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "follow_up": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
      "client_nonce": {
       "type": [
        "number",
@@ -2073,6 +2260,43 @@
        "null"
       ]
      },
+     "state": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "pending_checking, applied, applied_other, refused or still_unknown"
+     },
+     "text": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "next": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "resend": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "read": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "follow_up": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
      "client_nonce": {
       "type": [
        "number",
@@ -2203,6 +2427,43 @@
      "delivery_unknown": {
       "type": [
        "boolean",
+       "null"
+      ]
+     },
+     "state": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "pending_checking, applied, applied_other, refused or still_unknown"
+     },
+     "text": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "next": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "resend": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "read": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "follow_up": {
+      "type": [
+       "object",
        "null"
       ]
      },
@@ -2341,6 +2602,43 @@
        "null"
       ]
      },
+     "state": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "pending_checking, applied, applied_other, refused or still_unknown"
+     },
+     "text": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "next": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "resend": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "read": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "follow_up": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
      "replaced_order_id": {
       "type": [
        "number",
@@ -2461,6 +2759,43 @@
        "boolean",
        "null"
       ]
+     },
+     "state": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "pending_checking, applied, applied_other, refused or still_unknown"
+     },
+     "text": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "next": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "resend": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "read": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "follow_up": {
+      "type": [
+       "object",
+       "null"
+      ]
      }
     },
     "required": [
@@ -2572,6 +2907,43 @@
        "null"
       ]
      },
+     "state": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "pending_checking, applied, applied_other, refused or still_unknown"
+     },
+     "text": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "next": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "resend": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "read": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "follow_up": {
+      "type": [
+       "object",
+       "null"
+      ]
+     },
      "scope": {
       "type": [
        "string",
@@ -2635,6 +3007,13 @@
        "string",
        "null"
       ]
+     },
+     "cancel_state": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "the cancel part's own state"
      }
     },
     "required": [

@@ -14,3 +14,18 @@ def _nonce_state(monkeypatch, tmp_path):
     nonces._ALLOCATORS.clear()
     yield
     nonces._ALLOCATORS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_read_back_wait(monkeypatch):
+    """A lost answer is read back once, not for 20 s (tests that judge the wait set their own clock)."""
+    from vordium_mcp import outcome, tools
+    monkeypatch.setattr(tools, "SETTLE_S", 0.0)
+    monkeypatch.setattr(outcome, "CHECK_S", 0.0)
+    try:                                       # an SDK that reads a lost answer back itself: once, here too
+        from vordium import dex, outcome as sdk_outcome
+        monkeypatch.setattr(sdk_outcome, "SETTLE_S", 0.0)
+        monkeypatch.setattr(dex, "SETTLE_DEFAULT", 0.0, raising=False)
+    except Exception:
+        pass
+    yield

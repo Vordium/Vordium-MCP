@@ -250,7 +250,7 @@ def test_cancel_all_is_one_request_where_the_network_offers_it(stub):
 def test_cancel_all_one_by_one_elsewhere(stub):
     net, cfg, chain = setup(active=True, **routes(specs={"specs": {**SPECS["specs"], "mm_release_active": False}}))
     err, doc = run(chain, trading(cfg, stub), "cancel_all", {"symbol": "ETH"})
-    assert not err and stub.sent == [("cancel", {"order_id": 77})] and doc["chain_answer"]["one_by_one"] == 1
+    assert not err and stub.sent == [("cancel", {"order_id": 77, "settle": False})] and doc["chain_answer"]["one_by_one"] == 1
 
 
 def test_modify_order_replaces_at_the_new_price(stub):
@@ -448,7 +448,7 @@ def test_cancel_all_one_by_one_reports_each_answer(stub, monkeypatch):
     net, cfg, chain = setup(active=True, **routes(orders=two, specs={"specs": {**SPECS["specs"], "mm_release_active": False}}))
     calls = []
 
-    def cancel(cfg, rest, order_id):
+    def cancel(cfg, rest, order_id, **k):
         calls.append(order_id)
         if order_id == 78:
             raise ConnectionError("dropped")
@@ -456,7 +456,10 @@ def test_cancel_all_one_by_one_reports_each_answer(stub, monkeypatch):
     monkeypatch.setattr(stub, "cancel", cancel)
     err, doc = run(chain, trading(cfg, stub), "cancel_all", {})
     answers = doc["chain_answer"]["answers"]
-    assert calls == [77, 78] and answers[0]["status_code"] == 202 and "dropped" in answers[1]["error"] and doc["accepted"] is False
+    assert calls == [77, 78] and answers[0]["status_code"] == 202 and "dropped" in answers[1]["error"]
+    # one answer was lost: the read decides, and the fake still lists both orders
+    assert doc["accepted"] is None and doc["state"] == "pending_checking" and doc["still_open"] == [77, 78]
+    assert doc["follow_up"]["arguments"]["order_ids"] == [77, 78]
 
 
 def test_a_failure_while_sending_never_says_nothing_was_sent(stub, monkeypatch):

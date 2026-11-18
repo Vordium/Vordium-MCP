@@ -19,7 +19,7 @@ WRITES = ["check_order", "my_buying_power", "place_order", "close_position", "se
 LISTED = ["get_status", "get_network", "get_markets", "get_fees", "get_oracle", "get_orderbook", "get_candles", "get_trades",
           "get_funding", "get_account", "get_fills", "get_balance", "get_positions", "get_orders", "get_agents",
           "get_policy", "get_risk", "get_tiers", "get_season", "get_points", "get_leaderboard", "get_referrals", "get_tx",
-          "get_block", "get_address", "get_order"]
+          "get_block", "get_address", "get_order", "check_outcome"]
 
 
 def call(chain, cfg, name, args=None):

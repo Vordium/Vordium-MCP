@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.7.0
+- A write whose answer was lost (a timeout, a dropped connection, a gateway error, an answer that could not be read) is
+  read back from the node for up to 20 seconds from its send: the account's resting orders first, then the node's
+  account and agent records. Its result says `state`: `applied`, `applied_other` (a cancel that came after a fill, or a
+  cancel-all where some orders filled first), `refused` (a record names the chain's reason), `pending_checking` (still
+  being checked) or `still_unknown` (nothing proven after 2 minutes; it may still apply). Each state has its own
+  `text` and `next`, per action: an order, a cancel and a cancel-all each have their own words. `resend` says whether
+  sending it again is safe, `read` names the node read that decided, and while it is still being checked `follow_up`
+  names the `check_outcome` call with its arguments. The explorer and the trades list are never read for an
+  outcome. An order is never sent again by this server.
+- New read-only tool `check_outcome` (on every server, the hosted one included): one check of up to 20 seconds (8 on a
+  hosted server) of
+  an order by its client nonce, a cancel by its order id, or a cancel-all by the order ids open before it.
+- `cancel_all` reads the account's open orders before it sends and judges the result by them: applied when none of them
+  is still listed. Sent one order at a time, each cancel is judged by that read, not by its status code; a lost answer
+  among them is read back like any other. A cancel-all whose orders could not be read on such a network is refused
+  before anything is signed.
+- `stop_all` reports the state of its cancel part in `cancel_state`.
+- With an SDK that reads a lost answer back itself, the server asks it to do so for up to 20 seconds.
+- The `trade` extra needs `vordium>=1.7.0`, the SDK that reads a lost answer back from the node. With it, signing uses
+  each network's identity (chain id and genesis) from the signed release record, verified under the release key pinned
+  by its fingerprint, and still requires it to equal this server's own pin. Once a network's record has been read on a
+  computer, signing for that network waits until a record is served again; such a refusal is answered with the SDK's
+  own sentence.
+
 ## 0.6.6
 - Every read that is not served (tool reads, resources, agent records and the order pre-check) is reported with one
   sentence: the address that was read and its status, and for a redirect "a redirect, not followed: use the node's

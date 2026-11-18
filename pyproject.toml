@@ -28,7 +28,7 @@ dependencies = []
 [project.optional-dependencies]
 # The SDK floor is the first release that signs and reads safely: no redirect following, ASCII-only figures, its own
 # network pins. A floor below it lets an install keep an SDK without those rules.
-trade = ["vordium>=1.6.1", "keyring>=24"]
+trade = ["vordium>=1.7.0", "keyring>=24"]
 
 [project.urls]
 Homepage = "https://vordium.com"
@@ -44,3 +44,6 @@ version = { attr = "vordium_mcp.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["vordium_mcp*"]
+
+[tool.setuptools.package-data]
+vordium_mcp = ["outcome_words.json"]

@@ -24,8 +24,11 @@ def out(**props):
             "required": ["summary", "network"]}
 
 
+# what a write whose answer was lost did, read back from the node (the shared outcome words); absent on a plain answer
+OUTCOME = dict(state={"type": ["string", "null"], "description": "pending_checking, applied, applied_other, refused or still_unknown"},
+               text=S, next=S, resend=O, read=O, follow_up=O)
 WRITE_OUT = dict(sent=B, accepted=B, agent=S, chain_status=N, chain_answer={}, confirmation=O,
-                 refused=B, refusal_reason=S, refusal_meaning=S, note=S, already_received=B, delivery_unknown=B)
+                 refused=B, refusal_reason=S, refusal_meaning=S, note=S, already_received=B, delivery_unknown=B, **OUTCOME)
 
 OUTPUT = {
     "get_status": out(live=B, height=N, finalized_height=N, blocks_per_second=N, trading_open=B, deposits_open=B,
@@ -44,6 +47,7 @@ OUTPUT = {
     "get_positions": out(address=S, count=N, positions=A),
     "get_orders": out(address=S, count=N, orders=A),
     "get_order": out(address=S, order_id=N, found=B, order=O),
+    "check_outcome": out(kind=S, address=S, client_nonce=N, refusal_reason=S, refusal_meaning=S, **OUTCOME),
     "get_agents": out(owner=S, count=N, agents=A),
     "get_policy": out(owner=S, count=N, agents=A, available=B),
     "get_risk": out(owner=S, count=N, agents=A, available=B),
@@ -63,5 +67,6 @@ OUTPUT = {
     "cancel_all": out(**WRITE_OUT, scope=S),
     "modify_order": out(**WRITE_OUT, replaced_order_id=N, client_nonce=N),
     "set_tpsl": out(**WRITE_OUT, position_id=N, take_profit=N, stop_loss=N),
-    "stop_all": out(stopped=B, at=S, cancel_all=O, revoke_on_chain=S),
+    "stop_all": out(stopped=B, at=S, cancel_all=O, revoke_on_chain=S,
+                    cancel_state={"type": ["string", "null"], "description": "the cancel part's own state"}),
 }

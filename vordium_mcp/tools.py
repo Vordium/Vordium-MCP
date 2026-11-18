@@ -15,7 +15,7 @@ from . import keys, networks, pretrade
 import time
 import re
 
-from . import reads
+from . import outcome, reads
 from .chain import ChainUnreachable, answered
 from .networks import NETWORKS
 from .schemas import LOCAL_READ, OUTPUT, READ, WRITE
@@ -618,7 +618,9 @@ def _confirm(cfg, kind, summary, details):
     return {"asked": True, "confirmed": True}
 
 
-def _write(chain, cfg, kind, params, do, precheck=None, describe=None):
+def _write(chain, cfg, kind, params, do, precheck=None, describe=None, track=None):
+    """``track`` (a dict) is filled by ``do`` with what identifies the write on the chain (client nonce, order id, the
+    orders listed before a cancel-all): a write whose answer is lost is then read back from the node."""
     network_identity(chain)
     require_pin(chain)
     if cfg.read_only:
@@ -651,6 +653,9 @@ def _write(chain, cfg, kind, params, do, precheck=None, describe=None):
         raise Refusal(f"{kind} refused: this server was stopped with stop_all ({held.get('at')}) while the order waited",
                       remedy=f"Run `{_resume_hint(cfg)}` to allow trading again. Nothing was signed or sent.")
     require_pin(chain, force=True)                     # read again after the user decided: still the pinned network
+    track = {} if track is None else track
+    track.update(agent=agent, sent_ms=int(time.time() * 1000))
+    start = time.monotonic()
     try:
         answer = do(signer, agent, pair)
     except Refusal:
@@ -663,45 +668,165 @@ def _write(chain, cfg, kind, params, do, precheck=None, describe=None):
         if type(e).__name__ == "DeliveryUnknown":       # the SDK sent it and no answer came back: neither accepted nor refused
             answer = {"status": "unknown", "delivery_unknown": True, "detail": str(e)[:300],
                       "nonce": getattr(e, "nonce", None), "attempts": getattr(e, "attempts", None)}
-            return _unknown(chain, kind, agent, asked, answer)
+            return _unknown(chain, cfg, kind, agent, asked, answer, track, start)
         raise Refusal(f"{kind}: it failed while signing or sending ({type(e).__name__}); it may have reached "
                       "the chain", readings={"error": clean(str(e))}, remedy="Read get_orders and get_positions before trying again.",
                       note="It may have been signed and sent: check before trying again.")
     code = answer.get("status_code") if isinstance(answer, dict) else None
+    if isinstance(answer, dict) and isinstance(answer.get("outcome"), dict):
+        # the SDK read a lost answer back itself: the node's reads decide here too, in this server's words
+        return _unknown(chain, cfg, kind, agent, asked, answer, track, start)
     # a copy of the same signed request was sent again after a lost answer, and the chain said its nonce was used: the
     # first copy arrived, and nothing was sent twice
     received = isinstance(answer, dict) and answer.get("already_received") is True
     # the answer was lost, and it is not known whether the chain has it: never "accepted", never "refused"
     unknown = isinstance(answer, dict) and not received and (answer.get("status") == "unknown" or answer.get("unknown") is True
-                                                               or answer.get("delivery_unknown") is True)
+                                                               or answer.get("delivery_unknown") is True
+                                                               or answer.get("state") in ("pending_checking", "still_unknown"))
     if unknown:
-        return _unknown(chain, kind, agent, asked, answer)
+        return _unknown(chain, cfg, kind, agent, asked, answer, track, start)
     if isinstance(answer, dict) and answer.get("status") == "not_sent":
         raise Refusal(f"{kind}: the network could not be reached, so nothing was sent", remedy="Try again when the network answers.")
     if isinstance(answer, dict) and answer.get("status") == "filled":     # a cancel that came after the order filled
-        return {"summary": f"{kind}: the order filled before the cancel; check your position.", "network": chain.network,
-                "sent": True, "agent": agent, "confirmation": asked, "chain_status": None, "chain_answer": answer,
-                "accepted": False, "already_received": False,
-                "note": "The order is no longer on the book because it filled: read get_positions."}
-    return {"summary": f"{kind}: " + ("received by the chain (an earlier copy of the same signed request arrived; it was "
-                                      "not made twice)." if received else
-                                      "received by the chain." if isinstance(code, int) and 200 <= code < 300 else
-                                      f"the chain answered {code}."),
-            "network": chain.network, "sent": True, "agent": agent, "confirmation": asked, "chain_status": code, "chain_answer": answer,
-            "accepted": received or (isinstance(code, int) and 200 <= code < 300), "already_received": received,
-            "note": "This is the chain's own answer, unchanged. Accepted means received, not filled: read "
-                    "get_orders and get_positions to see what the chain applied. The chain enforces the agent's "
-                    "policy and market limits; it may still drop an order this server let through."}
+        out = {"summary": f"{kind}: the order filled before the cancel; check your position.", "network": chain.network,
+               "sent": True, "agent": agent, "confirmation": asked, "chain_status": None, "chain_answer": answer,
+               "accepted": False, "already_received": False,
+               "note": "The order is off the book because it filled: read get_positions."}
+        return _worded(out, kind, "applied_other")
+    out = {"summary": f"{kind}: " + ("received by the chain (an earlier copy of the same signed request arrived; it was "
+                                     "not made twice)." if received else
+                                     "received by the chain." if isinstance(code, int) and 200 <= code < 300 else
+                                     f"the chain answered {code}."),
+           "network": chain.network, "sent": True, "agent": agent, "confirmation": asked, "chain_status": code, "chain_answer": answer,
+           "accepted": received or (isinstance(code, int) and 200 <= code < 300), "already_received": received,
+           "note": "This is the chain's own answer, unchanged. Accepted means received, not filled: read "
+                   "get_orders and get_positions to see what the chain applied. The chain enforces the agent's "
+                   "policy and market limits; it may still drop an order this server let through."}
+    if kind == "cancel_order" and received and isinstance(answer, dict) and answer.get("status") == "done":
+        return _worded(out, kind, "applied")         # the SDK's read-back: the order was cancelled by an earlier copy
+    return out
 
 
-def _unknown(chain, kind, agent, asked, answer):
-    """A write that was sent and whose answer was lost: it may have reached the chain. Never accepted, never refused."""
-    return {"summary": f"{kind}: not known whether the chain received it - it may have reached the chain (the answer "
-                       "was lost); it was not sent twice. Check the open orders before placing it again.",
-            "network": chain.network, "sent": True, "agent": agent, "confirmation": asked, "chain_status": None,
-            "chain_answer": answer, "accepted": None, "already_received": False, "delivery_unknown": True,
-            "note": "Read get_orders and get_positions to see what the chain applied before sending it again: a new "
-                    "attempt is a new order."}
+# the action of each write in the shared word file (set_tpsl has none: its lost answer keeps its own sentence)
+ACTION_OF = {"place_order": "order", "close_position": "order", "modify_order": "order", "cancel_order": "cancel",
+             "cancel_all": "cancel_all"}
+SETTLE_S = outcome.CHECK_S       # a lost answer is read back for at most this long from the send, then the call answers
+HOSTED_CHECK_S = 8.0             # check_outcome on a public server: one shorter check per call
+
+
+def _worded(out, kind, state):
+    """a final the SDK already proved, in the word file's words (unchanged when the words cannot be read)"""
+    try:
+        text, nxt = outcome.phrase(ACTION_OF[kind], state)
+    except Exception:
+        return out
+    return {**out, "summary": f"{kind}: " + " ".join(x for x in (text, nxt) if x), "state": state, "text": text,
+            "next": nxt}
+
+
+def _follow(action, owner, track):
+    """the check_outcome arguments that follow this write up"""
+    f = {"kind": action, "address": owner, "since_ms": track.get("sent_ms")}
+    if action == "order":
+        f.update(client_nonce=track.get("client_nonce"), agent=track.get("agent"))
+        if (track.get("signed") or {}).get("pair_id") is not None:
+            f["pair_id"] = track["signed"]["pair_id"]
+    elif action == "cancel":
+        f["order_id"] = track.get("order_id")
+    else:
+        if track.get("before") is not None:
+            f["order_ids"] = [int(i) for i in track["before"]]
+        if track.get("pair_id") is not None:
+            f["pair_id"] = track["pair_id"]
+    return {k: v for k, v in f.items() if v is not None}
+
+
+def judge_for(chain, action, owner, track):
+    """one look at the node's reads for this write (None: nothing it could be judged by)"""
+    if action == "order":
+        if track.get("client_nonce") is None:
+            return None
+        return lambda: outcome.judge_order(outcome.Reads(chain, owner, track.get("agent")), track["client_nonce"],
+                                           track.get("signed"))
+    if action == "cancel":
+        if track.get("order_id") is None:
+            return None
+        return lambda: outcome.judge_cancel(outcome.Reads(chain, owner), track["order_id"])
+    return lambda: outcome.judge_cancel_all(outcome.Reads(chain, owner), track.get("before"), track.get("pair_id"))
+
+
+def _sdk_verdict(sdk, track):
+    """a final the SDK's own read-back proved, as a verdict (None when it proved none). The SDK compares the signed
+    size and price and its own nonce marks, which this server cannot: its final decides."""
+    if not isinstance(sdk, dict) or sdk.get("state") not in outcome.FINAL:
+        return None
+    ref, counts, read = sdk.get("refusal") or {}, sdk.get("counts") or {}, sdk.get("read")
+    h = outcome._num((read or {}).get("height")) if isinstance(read, dict) else None
+    m = len(track.get("before") or []) if track.get("before") is not None else None
+    values = {"order_words": "Placed", "height": h, "n": m, "m": m, "k": 0 if m is not None else None}
+    values.update({k: counts[k] for k in ("n", "m", "k") if isinstance(counts.get(k), int) and not isinstance(counts[k], bool)})
+    return {"state": sdk["state"], "code": ref.get("code"), "meaning": ref.get("meaning"), "action": ref.get("action"),
+            "read": read if isinstance(read, dict) else None, "values": values,
+            "order_id": outcome._num(sdk.get("order_id"))}
+
+
+def _bounded(fn, seconds):
+    """``fn`` with every network read inside it sharing a time limit (when no call limit is in force already: a
+    server on your own machine has none), so a check of N seconds is not stretched by slow reads"""
+    from .limits import deadline, wait_left
+    if wait_left(1e9) < 1e8:
+        return fn()
+    with deadline(seconds + 6.0):
+        return fn()
+
+
+def settle(chain, cfg, kind, track, start, wait_s=None, sdk=None):
+    """Read the node until the write shows (or a record refuses it), at most ``wait_s`` (SETTLE_S) from its send: the
+    word-file fields (state, text, next, resend, read, follow_up), or None when it cannot be judged."""
+    from .limits import wait_left
+    action = ACTION_OF.get(kind)
+    judge = judge_for(chain, action, cfg.owner, track or {}) if action else None
+    if judge is None:
+        return None
+    try:
+        v = _sdk_verdict(sdk, track)             # a final the SDK proved (it compares more than this server can)
+        if v is None:
+            v = _bounded(lambda: outcome.check(judge, start + (SETTLE_S if wait_s is None else wait_s),
+                                               left=lambda: wait_left(1e9)), SETTLE_S)
+        return outcome.result(chain, action, v, _follow(action, cfg.owner, track), since_ms=track.get("sent_ms"))
+    except Exception:        # no words, or a read that broke: the plain unknown answer below, never a made-up final
+        return None
+
+
+def _unknown(chain, cfg, kind, agent, asked, answer, track=None, start=None):
+    """A write that was sent and whose answer was lost: it may have reached the chain. It is read back from the node (the
+    account's orders and records, never the explorer) for up to SETTLE_S: applied or refused only when a read shows it;
+    otherwise still being checked, with the check_outcome call that follows it up."""
+    base = {"network": chain.network, "sent": True, "agent": agent, "confirmation": asked, "chain_status": None,
+            "chain_answer": answer, "accepted": None, "already_received": False, "delivery_unknown": True}
+    o = settle(chain, cfg, kind, track, time.monotonic() if start is None else start,
+               sdk=answer.get("outcome") if isinstance(answer, dict) else None)
+    if o is None:
+        what = ("Read get_positions: the position's take-profit and stop-loss show what the chain applied."
+                if kind == "set_tpsl" else "Read get_orders and get_positions to see what the chain applied.")
+        return {**base, "summary": f"{kind}: not known whether the chain received it - it may have reached the chain (the "
+                                   "answer was lost); it was not sent twice.",
+                "note": what + " It was not sent again."}
+    st = o["state"]
+    own = o.pop("own_sentence") or st         # a final whose figures were not read: its state, never an empty sentence
+    out = {**base, **o, "summary": f"{kind}: {own}"}
+    if st == "applied" or (st == "applied_other" and kind == "cancel_all"):
+        out.update(accepted=True, already_received=True,
+                   note="The node's read shows it applied. It was not sent again by this server.")
+    elif st == "applied_other":
+        out.update(accepted=False, note="The order is off the book because it filled: read get_positions.")
+    elif st == "refused":
+        out.update(accepted=False, refused=True,
+                   note="The chain's record refuses it." + (" Nothing reached the book." if ACTION_OF.get(kind) == "order" else ""))
+    else:
+        out["note"] = ("It was not sent again. The node is still being read: call check_outcome with "
+                       "follow_up.arguments for the final result.")
+    return out
 
 
 def client_nonce(chain, cfg, kind):
@@ -765,8 +890,12 @@ def _place(chain, cfg, params, kind):
                           remedy="Fixes that pass: " + ("; ".join(f["label"] for f in r["fixes"] if f.get("passes")) or "none worked out")
                                  + ". Nothing was signed or sent.")
 
+    track = {}
+
     def do(signer, agent, pair):
         nonce.append(client_nonce(chain, cfg, kind))
+        # what a read-back matches besides the nonce (the SDK puts size and price on the market's steps: not compared)
+        track.update(client_nonce=nonce[0], signed={"pair_id": pair["pair_id"], "side": side})
         return signer.place(cfg, chain.rest, pair_id=pair["pair_id"], side=side, size=size, price=price,
                             leverage=leverage, order_type=otype, reduce_only=bool(params.get("reduce_only", False)),
                             post_only=bool(params.get("post_only", False)), client_nonce=nonce[0])
@@ -778,8 +907,8 @@ def _place(chain, cfg, params, kind):
         return what, {"market": signed_market(pair), "pair_id": pair.get("pair_id"), "side": "buy" if side == 0 else "sell", "size": size,
                       "order_type": "limit" if otype == 1 else "market", "price": price if otype == 1 else None,
                       "leverage": leverage, "reduce_only": bool(params.get("reduce_only", False))}
-    out = _write(chain, cfg, kind, params, do, precheck, describe)
-    if out.get("accepted"):
+    out = _write(chain, cfg, kind, params, do, precheck, describe, track)
+    if out.get("accepted") and "state" not in out:       # a read-back already judged the records
         try:
             why = refusal_of(chain, out.get("agent"), nonce[0])
         except Exception:
@@ -789,7 +918,7 @@ def _place(chain, cfg, params, kind):
                        note="The chain received the order and then refused it (its agent_refused record names the reason). "
                             "Nothing reached the book.")
             _add_meaning(chain, out)
-    else:
+    elif "state" not in out:
         _intake_refusal(chain, out)
     out["client_nonce"] = nonce[0] if nonce else None
     return out
@@ -906,8 +1035,8 @@ def cancel_order(chain, cfg, params):
 
     def do(signer, agent, pair):
         return signer.cancel(cfg, chain.rest, order_id=order_id)
-    out = _write(chain, cfg, "cancel_order", params, do)
-    if not out.get("accepted"):
+    out = _write(chain, cfg, "cancel_order", params, do, track={"order_id": order_id})
+    if not out.get("accepted") and "state" not in out:
         _intake_refusal(chain, out)
     return out
 
@@ -978,6 +1107,72 @@ def get_order(chain, cfg, params):
             "source": source(o)}
 
 
+def check_outcome(chain, cfg, params):
+    """What a write whose answer was lost did: one bounded check of the node's reads (the account's orders and records,
+    never the explorer), by the same judges the write tools use."""
+    network_identity(chain)
+    from .limits import wait_left
+    action = str(params.get("kind") or "").strip().lower()
+    if action not in outcome.ACTIONS:
+        raise Refusal("kind is order, cancel or cancel_all")
+    owner = _owner(cfg, params, "check_outcome")
+
+    def whole(name, required=False, least=0):
+        v = params.get(name)
+        if v in (None, ""):
+            if required:
+                raise Refusal(f"check_outcome: kind {action} needs {name}")
+            return None
+        if isinstance(v, bool) or not isinstance(v, (int, str)):
+            raise Refusal(f"{name} must be a whole number")
+        try:
+            n = int(str(v).strip())
+        except ValueError:
+            raise Refusal(f"{name} must be a whole number")
+        if n < least or n >= 2 ** 64:
+            raise Refusal(f"{name} is out of range")
+        return n
+    since = whole("since_ms")
+    now_ms = int(time.time() * 1000)
+    if since is not None and since > now_ms + 60_000:
+        raise Refusal("since_ms is in the future: give the time the write was sent (unix milliseconds)")
+    track = {"sent_ms": since, "pair_id": whole("pair_id") or None}           # pair 0: every market
+    if action == "order":
+        track["client_nonce"] = whole("client_nonce", required=True, least=1)
+        agent = params.get("agent")
+        if agent not in (None, ""):
+            track["agent"] = _address({"agent": agent}, "agent")
+        if track["pair_id"] is not None:
+            track["signed"] = {"pair_id": track["pair_id"]}
+    elif action == "cancel":
+        track["order_id"] = whole("order_id", required=True)
+    else:
+        ids = params.get("order_ids")
+        if ids is not None:
+            if not isinstance(ids, list) or len(ids) > 500:
+                raise Refusal("order_ids is a list of at most 500 order ids (the ones open before the cancel-all)")
+            track["before"] = [_one_id(i) for i in ids]
+    # a public server checks for a shorter time (it serves many callers); the follow-up asks again
+    wait = min(outcome.CHECK_S, HOSTED_CHECK_S) if cfg.hosted else outcome.CHECK_S
+    v = _bounded(lambda: outcome.check(judge_for(chain, action, owner, track), time.monotonic() + wait,
+                                       left=lambda: wait_left(1e9)), wait)
+    o = outcome.result(chain, action, v, _follow(action, owner, track), since_ms=since, now_ms=now_ms)
+    own = o.pop("own_sentence")
+    what = {"order": f"order with client nonce {track.get('client_nonce')}", "cancel": f"cancel of order {track.get('order_id')}",
+            "cancel_all": "cancel-all"}[action]
+    return {"summary": f"The {what}: {own}", "network": chain.network, "kind": action, "address": owner,
+            "client_nonce": track.get("client_nonce"), **{k: v for k, v in o.items()},
+            "note": "Read from the node only (the account's orders and records), never the explorer. "
+                    + ("Call again with the same arguments to check again." if o["state"] in ("pending_checking", "still_unknown")
+                       else "This is the final result.")}
+
+
+def _one_id(v):
+    if isinstance(v, bool) or not isinstance(v, (int, str)) or not re.fullmatch(r"[0-9]{1,19}", str(v).strip()):
+        raise Refusal("order_ids holds whole order ids")
+    return int(str(v).strip())
+
+
 def close_position(chain, cfg, params):
     """A reduce-only order against the owner's position in one market: all of it, or a fraction."""
     network_identity(chain)
@@ -1013,23 +1208,50 @@ def cancel_all(chain, cfg, params):
     ms = chain.market_specs()
     one_shot = ms.ok and isinstance(ms["json"], dict) and (ms["json"].get("specs") or {}).get("mm_release_active") is True
 
+    track = {"pair_id": pair["pair_id"] if pair else None}
+
     def do(signer, agent, _pair):
+        # the orders listed before the send: a cancel-all is judged by none of them still being listed
+        try:
+            o = chain.orders(cfg.owner)
+            listed = _rows(o["json"], "orders") if o.ok and isinstance(o["json"], (list, dict)) else None
+        except ChainUnreachable:
+            listed = None
+        track["before"] = None if listed is None else outcome.own_order_ids(listed, pair["pair_id"] if pair else None)
         if one_shot:
             return signer.cancel_all(cfg, chain.rest, pair_id=(pair or {}).get("pair_id", 0))
         # this network cancels one order at a time
-        listed = _rows(chain.require(chain.orders(cfg.owner), "open orders"), "orders")
-        mine = [r for r in listed if pair is None or r.get("pair_id") == pair["pair_id"]]
+        if track["before"] is None:
+            raise Refusal("cancel_all: the open orders could not be read, so none was cancelled",
+                          remedy="Try again when the network answers. Nothing was signed or sent.")
         answers = []
-        for r in mine:
-            oid = int(r.get("id", r.get("order_id")))
+        for oid in track["before"]:
             try:
-                answers.append({"order_id": oid, **signer.cancel(cfg, chain.rest, order_id=oid)})
+                # each cancel answers at once: the read below judges them all together (no wait per order)
+                answers.append({"order_id": oid, **signer.cancel(cfg, chain.rest, order_id=oid, settle=False)})
             except Exception as e:                      # the rest are still tried; each answer says what happened
                 answers.append({"order_id": oid, "status_code": None, "error": f"{type(e).__name__}: {str(e)[:120]}"})
         ok = all(isinstance(a.get("status_code"), int) and 200 <= a["status_code"] < 300 for a in answers)
-        return {"status_code": 202 if ok else 400, "one_by_one": len(answers), "answers": answers}
-    out = _write(chain, cfg, "cancel_all", params, do)
+        # an answer that was lost (none, a timeout, a 5xx, the SDK's own unknown): the reads decide, never the codes
+        lost = any(not isinstance(a.get("status_code"), int) or a["status_code"] >= 500 or a["status_code"] == 408
+                   or a.get("status") == "unknown" for a in answers)
+        return {"status_code": 202 if ok else 400, "one_by_one": len(answers), "answers": answers,
+                **({"unknown": True} if lost else {})}
+    out = _write(chain, cfg, "cancel_all", params, do, track=track)
     out["scope"] = label(pair) if pair else "every market"
+    ans = out.get("chain_answer") if isinstance(out.get("chain_answer"), dict) else {}
+    taken = out.get("accepted") is True or ans.get("one_by_one") is not None
+    if "state" not in out and out.get("sent") and taken:
+        # taken: what it did is still read from the node (an accepted cancel-all is received, not yet applied); a
+        # cancel-all the chain refused is not read back
+        o = settle(chain, cfg, "cancel_all", track, time.monotonic())
+        if o is not None and o["state"] in ("applied", "applied_other"):
+            own = o.pop("own_sentence")
+            out.update(o, summary=f"cancel_all: {own}", accepted=True)
+        elif o is not None:
+            out.update(read=o.get("read"), follow_up=o.get("follow_up"), still_open=o.get("still_open"))
+            if ans.get("one_by_one") is not None:
+                out["accepted"] = False                 # one by one: the read shows orders still open
     return out
 
 
@@ -1092,12 +1314,16 @@ def modify_order(chain, cfg, params):
                 f"{chain.network}: it leaves the book and a new order rests in its place.")
         return what, {"order_id": order_id, "new_price": new_price / 1e8, "new_size": new_size / 1e18}
 
+    track = {}
+
     def do(signer, agent, pair):
         nonce.append(client_nonce(chain, cfg, "modify_order"))
+        track.update(client_nonce=nonce[0], signed={"pair_id": pair["pair_id"], "side": 0 if side == "buy" else 1})
         return signer.modify(cfg, chain.rest, order_id, new_price, new_size, pair["pair_id"], side, nonce[0])
-    out = _write(chain, cfg, "modify_order", p2, do, precheck, describe)
-    out.update(replaced_order_id=order_id, client_nonce=nonce[0] if nonce else None,
-               note="Accepted means received: the new order has a new id (get_orders lists it).")
+    out = _write(chain, cfg, "modify_order", p2, do, precheck, describe, track)
+    out.update(replaced_order_id=order_id, client_nonce=nonce[0] if nonce else None)
+    if "state" not in out:
+        out["note"] = "Accepted means received: the new order has a new id (get_orders lists it)."
     return out
 
 
@@ -1193,16 +1419,23 @@ def stop_all(chain, cfg, params):
     try:
         cancelled = cancel_all(chain, cfg, {})
         cancel_note = cancelled.get("summary")
-    except Refusal as r:
-        cancelled, cancel_note = None, f"open orders were NOT cancelled: {r.payload.get('reason')}"
+        # the cancel part's own state: the word-file state when the node's read decided it, else what the chain answered
+        # the cancel part's own state, in the outcome states: what the node's read decided, "refused" when the chain
+        # answered no, else "pending_checking" (taken or lost, and not shown yet)
+        one_by_one = isinstance(cancelled.get("chain_answer"), dict) and cancelled["chain_answer"].get("one_by_one") is not None
+        cancel_state = cancelled.get("state") or ("refused" if cancelled.get("accepted") is False and not one_by_one
+                                                   and not cancelled.get("follow_up") else "pending_checking")
+    except Refusal as r:          # nothing was signed or sent: there is no outcome to report
+        cancelled, cancel_state, cancel_note = None, None, f"open orders were NOT cancelled: {r.payload.get('reason')}"
     except Exception as e:
-        cancelled, cancel_note = None, (f"open orders may NOT be cancelled ({type(e).__name__}): read get_orders and cancel "
-                                        "them with cancel_all")
+        cancelled, cancel_state, cancel_note = None, "pending_checking", (
+            f"open orders may NOT be cancelled ({type(e).__name__}): read get_orders and cancel them with cancel_all")
     app = (NETWORKS.get(chain.network) or {}).get("app", "")
     head = (f"Stopped at {at}: this server signs nothing new (only cancels) until `{_resume_hint(cfg)}`. " if locked
             else lock_note)
     return {"summary": f"{head}{cancel_note} To end the agent itself on the chain, revoke it in Vordex → Agents (your wallet signs).",
             "network": chain.network, "stopped": locked, "at": at, "lock": p if locked else None, "cancel_all": cancelled,
+            "cancel_state": cancel_state,
             "revoke_on_chain": f"{app}/agents" if app else None,
             "note": "An agent key cannot revoke itself on the chain: only the owner can (Agents → Revoke)."}
 
@@ -1329,6 +1562,21 @@ TOOLS = [
        "was cancelled) is reported as gone. Ask: \"What is the state of order 8840974?\"",
        {"order_id": {"type": "integer", "description": "the chain's order id, as get_orders lists it"},
         "address": {**ADDR, "description": "the account (default: the server's configured owner)"}}, ["order_id"], get_order),
+    _t("check_outcome", "Request outcome",
+       "What a write whose answer was lost did, read from the node only (never the explorer): an order by its client "
+       "nonce, a cancel by its order id, or a cancel-all by the order ids open before it. One check of up to 20 seconds (8 on a hosted server): "
+       "applied, refused (with the chain's reason), still being checked, or still not known after 2 minutes. A write "
+       "tool whose answer was lost names this call with its arguments. Ask: \"Did my lost order go through?\"",
+       {"kind": {"type": "string", "enum": ["order", "cancel", "cancel_all"], "description": "which write: order, cancel or cancel_all"},
+        "address": {**ADDR, "description": "the account (default: the server's configured owner)"},
+        "client_nonce": {"type": "integer", "description": "kind order: the order's client nonce, as the write tool returned it", "minimum": 1},
+        "order_id": {"type": "integer", "description": "kind cancel: the id of the order that was being cancelled", "minimum": 0},
+        "order_ids": {"type": "array", "items": {"type": "integer"}, "maxItems": 500,
+                      "description": "kind cancel_all: the order ids open before it was sent, as the write tool returned them"},
+        "pair_id": {"type": "integer", "description": "optional: the market the order or cancel-all was for"},
+        "agent": {"type": "string", "description": "kind order, optional: the agent that signed it (its refusal records are read too)"},
+        "since_ms": {"type": "integer", "description": "when it was sent (unix milliseconds): past 2 minutes, not proven reads as still not known", "minimum": 0}},
+       ["kind"], check_outcome),
 ]
 
 # what an order says, for every tool that places one
@@ -1424,7 +1672,7 @@ NETWORK_TEXT = ("get_status", "get_network", "get_markets", "get_fees", "get_ora
                 "get_orders", "get_order", "get_account", "get_fills", "get_agents", "get_policy", "get_risk",
                 "get_season", "get_points", "get_leaderboard", "get_referrals", "get_tiers", "get_tx", "get_block",
                 "check_order", "my_buying_power", "place_order", "close_position", "modify_order", "set_tpsl",
-                "cancel_order", "cancel_all")
+                "cancel_order", "cancel_all", "check_outcome")
 
 
 def call(chain, cfg, name, params):

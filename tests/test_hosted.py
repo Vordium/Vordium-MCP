@@ -82,7 +82,7 @@ def test_hosted_settings():
 def test_hosted_lists_no_write_tool_and_refuses_one():
     net, cfg, chain = hosted()
     names = [t["name"] for t in handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, chain, cfg)["result"]["tools"]]
-    assert "place_order" not in names and "cancel_order" not in names and "get_order" in names and len(names) == 26
+    assert "place_order" not in names and "cancel_order" not in names and "get_order" in names and len(names) == 27
     for name in ("place_order", "cancel_order"):
         err, doc, _ = call(chain, cfg, name, {"side": "buy", "size": 1, "symbol": "ETH", "order_id": 1})
         assert err and "no tool named" in doc["reason"]

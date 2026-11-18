@@ -17,7 +17,7 @@ NAME_KEYS = frozenset(("name", "display_name", "displayName", "season", "market"
                        "tier", "referrer", "referred_by", "scope"))
 TEXT_KEYS = frozenset(("mandate", "description", "memo", "notes", "meaning", "refusal_meaning", "refusal_reason",
                        "message", "error", "detail", "how", "why", "network_answer", "network_error", "network_reason",
-                       "network_summary", "text"))
+                       "network_summary", "text", "next"))
 # the server's own sentences: never capped (they carry no network text)
 OWN_KEYS = frozenset(("summary", "reason", "remedy", "note", "units", "enforced_by", "data_note"))
 

@@ -72,17 +72,47 @@ def _client(cfg, rest):
     return dex, dex.Vordex(rpc_url=rest, network=net)
 
 
+SETTLE_S = 20      # how long the SDK may read a lost answer back inside the call (an SDK that offers it)
+
+
+def _settle(fn):
+    """settle_s for an SDK call that takes it (the SDK then reads a lost answer back itself); none for an older SDK"""
+    import inspect
+    try:
+        return {"settle_s": SETTLE_S} if "settle_s" in inspect.signature(fn).parameters else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _plain(answer):
+    """The SDK's answer as plain data: its outcome (an SDK that reads a lost answer back) as a dict of what decided it,
+    and never the handle that goes on reading."""
+    if not isinstance(answer, dict):
+        return answer
+    out = {k: v for k, v in answer.items() if k not in ("outcome", "pending")}
+    o = answer.get("outcome")
+    if o is not None:
+        d = o.as_dict() if hasattr(o, "as_dict") else (o if isinstance(o, dict) else {})
+        out["outcome"] = {k: d.get(k) for k in ("state", "applied", "refusal", "read", "counts", "final", "order_id")}
+    return out
+
+
 def place(cfg, rest, pair_id, side, size, price, leverage, order_type, reduce_only, post_only, client_nonce=None):
     dex, client = _client(cfg, rest)
-    return _signed(lambda: client.place_order(
+    return _plain(_signed(lambda: client.place_order(
         session_key=_key(cfg), owner=cfg.owner, pair_id=int(pair_id), side=int(side), size=float(size),
         price=float(price), leverage=float(leverage), order_type=int(order_type), reduce_only=bool(reduce_only),
-        post_only=bool(post_only), client_nonce=client_nonce))
+        post_only=bool(post_only), client_nonce=client_nonce, **_settle(client.place_order))))
 
 
-def cancel(cfg, rest, order_id):
+def cancel(cfg, rest, order_id, settle=True):
+    """``settle`` False: the SDK answers at once (cancels sent one by one are read back together by the caller)"""
     dex, client = _client(cfg, rest)
-    return _signed(lambda: client.cancel_order(session_key=_key(cfg), owner=cfg.owner, order_id=int(order_id)))
+    wait = _settle(client.cancel_order)
+    if wait and not settle:
+        wait = {"settle_s": 0}
+    return _plain(_signed(lambda: client.cancel_order(session_key=_key(cfg), owner=cfg.owner, order_id=int(order_id),
+                                                      **wait)))
 
 
 def _submitted(s):
@@ -91,6 +121,7 @@ def _submitted(s):
     return {"status_code": getattr(s, "status_code", None), "submitted": bool(getattr(s, "ok", False)),
             "nonce": getattr(s, "nonce", None), "already_received": bool(getattr(s, "already_received", False)),
             "unknown": bool(getattr(s, "unknown", False)),
+            **({"outcome": _plain({"outcome": s.outcome})["outcome"]} if getattr(s, "outcome", None) is not None else {}),
             "refusal": None if r is None else {"code": getattr(r, "code", None), "message": getattr(r, "message", None),
                                                "detail": getattr(r, "detail", None)}}
 
@@ -104,7 +135,7 @@ def _mm(cfg, rest):
 def cancel_all(cfg, rest, pair_id=0):
     """Every open order of the owner on ``pair_id`` (0 = every market), in one signed request."""
     m = _mm(cfg, rest)
-    return _submitted(_signed(lambda: m.cancel_all(pair_id=int(pair_id))))
+    return _submitted(_signed(lambda: m.cancel_all(pair_id=int(pair_id), **_settle(m.cancel_all))))
 
 
 def modify(cfg, rest, order_id, new_price_8dec, new_size_18dec, pair_id, side, client_nonce):

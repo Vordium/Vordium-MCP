@@ -1,0 +1,167 @@
+{
+ "_what": "The words of an action whose outcome is not yet known, one source for the app, the SDKs and the MCP. {placeholders} are filled by the client. Copied into each repo with a drift check; never edited in a copy.",
+ "headline": {
+  "pending_checking": "Pending — checking"
+ },
+ "limit_s": 120,
+ "actions": {
+  "order": {
+   "pending_checking": {
+    "text": "Pending — checking. Your order was sent but the answer was lost. Checking the network for it.",
+    "next": "Do not place it again. This takes up to 2 minutes."
+   },
+   "applied": {
+    "text": "{order_words}. Found on the network at block {height}.",
+    "next": ""
+   },
+   "refused": {
+    "text": "Not placed: {meaning}.",
+    "next": "{action}"
+   },
+   "not_applied": {
+    "text": "Not placed. The network did not take it, and its time to apply has passed.",
+    "next": "You can place it again."
+   },
+   "still_unknown": {
+    "text": "Still not known after 2 minutes. It was not sent again and may still apply.",
+    "next": "Check your open orders before you place it again."
+   }
+  },
+  "cancel": {
+   "pending_checking": {
+    "text": "Pending — checking. Your cancel was sent but the answer was lost. Checking whether the order is gone.",
+    "next": "Wait. This takes up to 2 minutes."
+   },
+   "applied": {
+    "text": "Cancelled. The order is off the book.",
+    "next": ""
+   },
+   "applied_other": {
+    "text": "Filled before the cancel.",
+    "next": "Check your position."
+   },
+   "refused": {
+    "text": "Not cancelled: {meaning}.",
+    "next": "{action}"
+   },
+   "still_unknown": {
+    "text": "Still not known after 2 minutes. The order is still on the book.",
+    "next": "You can cancel it again: cancelling twice has no extra effect."
+   },
+   "still_unknown_gone": {
+    "text": "Still not known after 2 minutes. The order is off the book: it was cancelled or filled.",
+    "next": "Check your position."
+   },
+   "still_unknown_unread": {
+    "text": "Still not known after 2 minutes. The network's reads did not answer.",
+    "next": "You can cancel it again: cancelling twice has no extra effect."
+   }
+  },
+  "cancel_all": {
+   "pending_checking": {
+    "text": "Pending — checking. Cancel all was sent but the answer was lost. Checking your open orders.",
+    "next": "Wait. This takes up to 2 minutes."
+   },
+   "applied": {
+    "text": "All {n} orders cancelled.",
+    "next": ""
+   },
+   "applied_other": {
+    "text": "{n} of {m} cancelled; {k} filled first.",
+    "next": ""
+   },
+   "refused": {
+    "text": "Not cancelled: {meaning}.",
+    "next": ""
+   },
+   "still_unknown": {
+    "text": "Still not known after 2 minutes. {n} orders are still open.",
+    "next": "Check your open orders; cancel what is still open."
+   },
+   "still_unknown_unread": {
+    "text": "Still not known after 2 minutes. The network's reads did not answer.",
+    "next": "Check your open orders; cancel what is still open."
+   }
+  },
+  "close_all": {
+   "pending_checking": {
+    "text": "Pending — checking. The closes were sent but the answers were lost. Checking your positions.",
+    "next": "Wait. This takes up to 2 minutes."
+   },
+   "applied": {
+    "text": "{n} positions closed.",
+    "next": ""
+   },
+   "applied_other": {
+    "text": "{n} of {m} closed. {k} still open.",
+    "next": "Close them on the trading page."
+   },
+   "refused": {
+    "text": "Not closed: {meaning}.",
+    "next": ""
+   },
+   "still_unknown": {
+    "text": "Still not known after 2 minutes. {n} positions are still open.",
+    "next": "Close what is still open on the trading page."
+   }
+  },
+  "revoke": {
+   "pending_checking": {
+    "text": "Pending — checking. The revoke was sent. Checking that the agent is revoked.",
+    "next": "Wait. This takes up to 2 minutes."
+   },
+   "applied": {
+    "text": "Agent revoked at block {height}. {m} orders cancelled.",
+    "next": ""
+   },
+   "refused": {
+    "text": "Not revoked: {meaning}.",
+    "next": ""
+   },
+   "still_unknown": {
+    "text": "Still not known after 2 minutes. The agent is still live.",
+    "next": "You can revoke again: it has no extra effect."
+   },
+   "still_unknown_unread": {
+    "text": "Still not known after 2 minutes. The network's reads did not answer.",
+    "next": "You can revoke again: it has no extra effect."
+   }
+  },
+  "stop": {
+   "pending_checking": {
+    "text": "Pending — checking. The stop was sent. Checking that your trading key and agents are stopped.",
+    "next": "Wait. This takes up to 2 minutes."
+   },
+   "applied": {
+    "text": "Stopped on the network: no trading key, no live agent, no open order.",
+    "next": ""
+   },
+   "applied_other": {
+    "text": "Your trading key and every agent are stopped. {n} orders your wallet placed itself stay open.",
+    "next": ""
+   },
+   "refused": {
+    "text": "Not stopped: {meaning}.",
+    "next": ""
+   },
+   "not_applied": {
+    "text": "Not stopped. That signature has passed its time to apply.",
+    "next": "Press Stop everything now again."
+   },
+   "still_unknown": {
+    "text": "Still not known after 2 minutes. {what_is_live}.",
+    "next": "You can stop again: it has no extra effect."
+   }
+  }
+ },
+ "resend_while_pending": {
+  "order": null,
+  "cancel": "Send the same cancel again",
+  "cancel_all": null,
+  "close_all": null,
+  "revoke": "Send the same revoke again",
+  "stop": "Send the same stop again"
+ },
+ "check_again": "Check again",
+ "place_as_new": "Place as a new order"
+}
